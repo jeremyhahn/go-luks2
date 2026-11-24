@@ -94,12 +94,7 @@ func countKDFCalls(t *testing.T) (*int, volumeSys) {
 	return &calls, sys
 }
 
-// TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving:
-// 32 keyslots and 32 digests -- within the parse bounds -- but every digest
-// names every keyslot, each at the iteration ceiling, so one unlock would make
-// 32 x 32 digest derivations at 100,000,000 iterations. cryptsetup refuses
-// such a header outright (a keyslot named by more than one digest); this
-// package refuses the operation, typed, before the first derivation.
+// TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving: 32x32 digest derivations at the ceiling are refused before the first.
 func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(t *testing.T) {
 	defer parallel(t)()
 	device := budgetFixture(t)
@@ -137,12 +132,7 @@ func TestAHeaderAskingForMoreDerivationThanCryptsetupCanIsRefusedBeforeDeriving(
 	}
 }
 
-// TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget is the other
-// half, and the one that must never regress: MaxKeyslots keyslots, one
-// digest each, every derivation at its ceiling -- Argon2 at 4 GiB and 10,000
-// passes, PBKDF2-SHA1 at 100,000,000 iterations over a 64-byte area key -- is
-// within the budget. The real-container half is
-// TestCompatCryptsetupsMaximumKeyslotsAndCostsAreNotRefused.
+// TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget: MaxKeyslots keyslots at every ceiling fit the budget.
 func TestTheMostExpensiveHeaderCryptsetupCanWriteFitsTheBudget(t *testing.T) {
 	defer parallel(t)()
 	device := budgetFixture(t)
@@ -255,12 +245,7 @@ func TestHeadersWithMoreKeyslotsOrDigestsThanCryptsetupCreatesAreRefusedOnRead(t
 	}
 }
 
-// TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving: the memory
-// side. Every enclave is admitted against go-enclave's process allocator; a
-// scan whose keyslot needs more locked memory than the allocator's whole
-// budget is refused up front, typed, rather than after its derivation.
-//
-// NOT PARALLEL: custody is package state.
+// TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving. Not parallel: custody is package state.
 func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) {
 	device := newImage(t, "admission.img")
 	formatWithLibrary(t, device)
@@ -283,11 +268,7 @@ func TestAKeyslotTheAllocatorCanNeverAdmitIsRefusedBeforeDeriving(t *testing.T) 
 	}
 }
 
-// peakRecorder admits every enclave against a fresh, unbounded-enough
-// allocator and records the most locked memory live at once. Allocation is
-// the only moment the total rises, so sampling after each one sees the peak.
-//
-// NOT PARALLEL, in every caller: custody is package state.
+// peakRecorder admits every enclave against a fresh allocator and records the peak locked memory. Not parallel.
 func peakRecorder(t *testing.T, budget int64) (enclave.Allocator, *int64) {
 	t.Helper()
 	a, err := enclave.NewAllocator(budget)
@@ -324,14 +305,7 @@ func scanPeak(t *testing.T, device string) int64 {
 	return plan.peakLocked
 }
 
-// TestKeyslotOpenPeakIsWhatTheUnlockAllocates measures the locked memory the
-// real keyslot path holds at its peak and requires the plan to name exactly
-// that, for each keyslot geometry cryptsetup writes: volume keys of 16, 32 and
-// 64 bytes, an area key shorter than the volume key, XTS and CBC areas,
-// sha256 and sha512 digests. An allocation added to the path without the plan
-// learning of it fails here; the AF diffusion state once did.
-//
-// NOT PARALLEL: peakRecorder.
+// TestKeyslotOpenPeakIsWhatTheUnlockAllocates checks the plan equals the measured peak for each keyslot geometry. Not parallel.
 func TestKeyslotOpenPeakIsWhatTheUnlockAllocates(t *testing.T) {
 	requireCryptsetup(t)
 	type geometry struct {
@@ -369,14 +343,7 @@ func TestKeyslotOpenPeakIsWhatTheUnlockAllocates(t *testing.T) {
 	}
 }
 
-// TestAnAllocatorSizedToThePlannedPeakOpensTheVolume is the review's case: an
-// allocator of exactly the planned peak lets the whole unlock through -- the
-// preflight's promise that what it admits, the path can allocate -- and one
-// page less is refused by the preflight, before any derivation. The plan used
-// to leave out the AF diffusion state, so the exact budget passed the
-// preflight, ran the KDF and decrypted, and then failed in the AF merge.
-//
-// NOT PARALLEL: peakRecorder, passphraseKDF.
+// TestAnAllocatorSizedToThePlannedPeakOpensTheVolume: the exact peak opens; one page less is refused before deriving. Not parallel.
 func TestAnAllocatorSizedToThePlannedPeakOpensTheVolume(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 	want := scanPeak(t, device)

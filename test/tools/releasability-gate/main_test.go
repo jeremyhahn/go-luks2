@@ -18,12 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/labstrings"
 )
 
-// entriesOf returns an index reader that reports exactly files, standing in for
-// the git index.
-// testPolicy is the repository's policy with a pattern set of documentation
-// values in place of the fleet set, so these tests spell no fleet value and
-// run alike in the development tree and in the published one, which carries
-// no fleet set.
+// testPolicy is the repository's policy with a documentation pattern set in place of the fleet set.
 var testPolicy = func() policy {
 	p := repositoryPolicy
 	p.patterns = []labstrings.Pattern{
@@ -34,6 +29,7 @@ var testPolicy = func() policy {
 	return p
 }()
 
+// entriesOf returns an index reader that reports exactly files, standing in for the git index.
 func entriesOf(files map[string]string) indexReader {
 	entries := make([]labstrings.Entry, 0, len(files))
 	for name, content := range files {
@@ -393,11 +389,7 @@ func TestRun_AStripAtPublishFileNotExportIgnoredFails(t *testing.T) {
 	}
 }
 
-// TestRun_TrackedAgentFilesPassARealIndex: CLAUDE.md, a nested AGENTS.md and a
-// .claude/ file, tracked in a real index beside this repository's
-// .gitattributes, pass the gate and are each listed as stripped at publish; a
-// script beside them still fails it, and so does each of them once no
-// .gitattributes export-ignores it.
+// TestRun_TrackedAgentFilesPassARealIndex: tracked agent files pass and are listed as stripped; a script beside them fails, as does each once not export-ignored.
 func TestRun_TrackedAgentFilesPassARealIndex(t *testing.T) {
 	attributes, err := os.ReadFile(filepath.Join(moduleRoot(t), labstrings.GitAttributes)) // #nosec G304 -- this module's own .gitattributes
 	if err != nil {

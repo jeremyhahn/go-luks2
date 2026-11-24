@@ -13,10 +13,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// verifyWrite reads back [0, size) of the device through mediumPath -- at
-// every place device.MediumSources says its bytes must be read past a cache
-// for the read to be the medium's, rather than the page cache's -- and
-// compares it with what stream wrote.
+// verifyWrite reads [0, size) back past every cache (device.MediumSources) and compares it with what stream wrote.
 func verifyWrite(ctx context.Context, path, mediumPath string, size int64, stream *passStream,
 	progress func(Progress), totalPasses int, s sys) error {
 	if size <= 0 {

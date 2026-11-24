@@ -15,50 +15,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// JSON passthrough for the LUKS2 metadata objects.
-//
-// WHY THIS EXISTS
-//
-// Every mutation this package performs -- AddKey, RemoveKey, ChangeKey,
-// ImportToken, RemoveToken -- goes through writeHeaderTo, and
-// writeHeaderTo re-marshals the ENTIRE metadata blob. So the header that
-// lands on disk contains exactly what these Go structs managed to hold, and a
-// JSON member no field models is not left alone: it is deleted, from an object
-// the operation never meant to touch.
-//
-// MEASURED, against systemd 255 and cryptsetup 2.7.0: a complete eight-member
-// `systemd-fido2` token was imported with `cryptsetup token import`, an
-// unrelated key was added with AddKey, and the token came back with six --
-// `fido2-clientPin-required` and `fido2-uv-required` were gone. That token no
-// longer describes the credential it was enrolled from.
-//
-// So each object carries the members it does not model, verbatim, and writes
-// them back out. The typed half always wins: a member the struct produces is
-// never overwritten by a carried one, because the struct is what the rest of
-// this package actually reasons about.
-//
-// WHY json.RawMessage AND NOT interface{}
-//
-// A JSON number decoded into interface{} becomes a float64. 2^64-1 comes back
-// as 18446744073709552000 -- a different number, silently -- and `1e3` comes
-// back as `1000`. LUKS2 objects carry byte offsets, shift sizes and TPM key
-// handles that reach that far, and a passthrough that alters a value it was
-// asked to preserve is worse than one that admits it dropped it. RawMessage is
-// the original bytes and cannot lie about them.
-//
-// WHAT IT COVERS
-//
-// Every object the metadata models: keyslots and their area, kdf and af,
-// tokens, segments, digests, config and config.requirements (#152). Members
-// at the top level of the metadata are not carried. Before any of them is
-// decoded, decodeMembers refuses an object that names a member twice or names
-// a modeled member in another case (#248).
+// JSON passthrough: each metadata object keeps the members it does not model as json.RawMessage and writes them back, so a rewrite never drops them; the typed half wins.
 
-// unknownFields holds the members of one JSON object that the Go struct for
-// that object does not model, exactly as they were read.
-//
-// A nil map is the normal state: an object this package fully understands
-// carries no passthrough at all rather than an empty one.
+// unknownFields holds one object's unmodeled members as read; nil when there are none.
 type unknownFields map[string]json.RawMessage
 
 // The metadata objects that carry a passthrough, named for the errors they
@@ -122,15 +81,7 @@ func (e *MetadataJSONError) Is(target error) bool {
 	return target == ErrMetadataJSON
 }
 
-// splitKnown returns the members of raw that are NOT in known.
-//
-// Removing the modeled members is what keeps a value from being held twice --
-// once typed and once raw -- which is how the two halves would come to
-// disagree about what the object says. It does not modify raw: the caller's
-// map is its own.
-//
-// known has at most a handful of entries, so a linear scan beats building a
-// set, and the common case allocates nothing at all.
+// splitKnown returns the members of raw not in known, without modifying raw.
 func splitKnown(raw map[string]json.RawMessage, known []string) unknownFields {
 	var unknown unknownFields
 	for name, value := range raw {
@@ -145,12 +96,7 @@ func splitKnown(raw map[string]json.RawMessage, known []string) unknownFields {
 	return unknown
 }
 
-// containsMember reports whether names holds name, matching case-
-// INSENSITIVELY to agree with how encoding/json itself binds a decoded
-// member to a struct field. A case variant of a modeled member never gets
-// this far on a decode -- decodeMembers refuses it first -- so this is the
-// same answer an exact comparison would give, kept in encoding/json's terms
-// so the typed half and the carried half can never both claim one member.
+// containsMember reports whether names holds name, case-insensitively as encoding/json binds fields.
 func containsMember(names []string, name string) bool {
 	for _, candidate := range names {
 		if strings.EqualFold(candidate, name) {
@@ -160,14 +106,7 @@ func containsMember(names []string, name string) bool {
 	return false
 }
 
-// decodeMembers splits the JSON object data into its members, refusing an
-// object that names a member twice or names one of known in a different case.
-// See ErrAmbiguousJSONMember.
-//
-// It runs BEFORE the typed decode, because the typed decode is where the
-// ambiguity is resolved silently. A map loses duplicates, so the object is
-// read token by token. A value that is not an object is left to the typed
-// decode, which reports it with encoding/json's own error type.
+// decodeMembers splits object data into members before the typed decode, refusing duplicates or case variants of known (ErrAmbiguousJSONMember).
 func decodeMembers(object string, data []byte, known []string) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
@@ -199,18 +138,7 @@ func decodeMembers(object string, data []byte, known []string) (map[string]json.
 	return members, nil
 }
 
-// mergeInto splices the carried members into typed -- the JSON object the
-// struct half produced -- and returns the combined object.
-//
-// It appends rather than re-encoding, so the struct's member ORDER survives:
-// cryptsetup emits a keyslot's members in a fixed order, this package matches
-// it through field declaration order, and decoding the typed half into a map
-// to merge would destroy that. A member the struct already produced is skipped,
-// which is what makes the typed half authoritative.
-//
-// Carried members are emitted in sorted order. Go randomizes map iteration, so
-// without the sort the same unchanged metadata would marshal to different
-// bytes on every write.
+// mergeInto appends the carried members to typed in sorted order, keeping the struct's member order and skipping members typed already produced.
 func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 	if len(u) == 0 {
 		return typed, nil
@@ -254,10 +182,7 @@ func (u unknownFields) mergeInto(typed []byte, object string) ([]byte, error) {
 		out.Write(quoted)
 		out.WriteByte(':')
 
-		// Compacting validates the member and strips the indentation it
-		// carried in from the header's JSON area, so MarshalJSON returns a
-		// well-formed compact object on its own rather than relying on the
-		// caller to normalize it.
+		// Compact the member so MarshalJSON returns a well-formed compact object.
 		if err := json.Compact(&out, u[name]); err != nil {
 			return nil, &MetadataJSONError{Object: object, Op: metadataJSONEncode, Member: name, Err: err}
 		}

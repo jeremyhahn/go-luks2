@@ -13,37 +13,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/kdf"
 )
 
-// Validation of the keyslot geometry a device declares about itself.
-//
-// # What a bad keyslot does without this
-//
-// A keyslot's declared fields are dereferenced and used as sizes. Measured
-// against this package before the check existed, driving each shape through the
-// real unlock path:
-//
-//	key_size = 0     PANIC  pkbdf2: keyLength must be larger than 0
-//	key_size = -1    PANIC  pkbdf2: keyLength must be larger than 0
-//	no kdf object    PANIC  nil pointer dereference
-//	no area object   PANIC  nil pointer dereference
-//	key_size = 1MiB  HANG   still in PBKDF2 at a 3-minute timeout
-//
-// # Why this is per-keyslot, and NOT a refusal of the whole header
-//
-// A LUKS2 container carries up to 32 keyslots precisely so that damage to one
-// is survivable. Bit rot in an unused slot, or a slot left half-written by an
-// interrupted AddKey, must cost that slot and nothing else; converting it into
-// an unopenable volume is permanent data loss manufactured by a safety check.
-//
-// So every failure here wraps ErrInvalidKeyslot, which is the value the keyslot
-// scan reads as "this slot is unusable, try the next one". A failure typed
-// anything else -- ErrInvalidHeader, a bare ErrInvalidSize -- would abort the
-// whole unlock and deny a volume its good keyslots can still open.
-//
-// # Where the limits come from
-//
-// Every limit here is measured against cryptsetup 2.7.0 rather than invented,
-// because a bound that refuses a container another implementation can open is
-// its own kind of defect.
+// Per-keyslot geometry validation: every failure wraps ErrInvalidKeyslot so the scan skips only that slot; limits match cryptsetup 2.7.0.
 const (
 	// MaxKeyslotKeySize is the largest volume key, in BYTES, this package will
 	// accept from a keyslot read off a device.
@@ -94,11 +64,7 @@ func ValidateKeyslot(id string, keyslot *Keyslot) error {
 		return &errs.Error{Kind: errs.ErrInvalidKeyslot, Detail: fmt.Sprintf("%s is null", label)}
 	}
 
-	// The area is where the keyslot lives on the device and every keyslot type
-	// has one, so it is checked for all of them. Its size bounds two
-	// allocations -- an ordinary buffer for the ciphertext and a LOCKED region
-	// for the plaintext -- which is why it is bounded here and not merely
-	// parsed.
+	// The area bounds both a ciphertext buffer and a locked plaintext region, so it is bounded here.
 	if keyslot.Area == nil {
 		return &errs.Error{Kind: errs.ErrInvalidKeyslot, Detail: fmt.Sprintf("%s has no area object", label)}
 	}
@@ -109,8 +75,7 @@ func ValidateKeyslot(id string, keyslot *Keyslot) error {
 			Detail: fmt.Sprintf("%s declares an area offset %q that is not a number", label, keyslot.Area.Offset),
 		}
 	}
-	// A NEGATIVE offset was accepted here until the removal guard needed to
-	// reason about where a keyslot lives.
+	// A negative offset is refused.
 	if areaOffset < 0 {
 		return &errs.Error{
 			Kind:   errs.ErrInvalidKeyslot,
@@ -131,8 +96,7 @@ func ValidateKeyslot(id string, keyslot *Keyslot) error {
 				label, areaSize),
 		}
 	}
-	// Checked BEFORE the addition, so that no consumer computes a sum that
-	// wraps.
+	// Checked before the addition so no sum wraps.
 	if areaOffset > math.MaxInt64-areaSize {
 		return &errs.Error{
 			Kind: errs.ErrInvalidKeyslot,

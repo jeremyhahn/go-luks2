@@ -17,12 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// TestHeaderWriteRead is a black-box round trip through the public API:
-// Format writes the header this package used to assemble by hand from
-// internal/header types (luks2.KDF, luks2.LUKS2Metadata, luks2.Keyslot,
-// luks2.AntiForensic, luks2.KeyslotArea -- all DELETE/UNEXPORT in B.6), and
-// Header reads it back, in place of luks2.CreateBinaryHeader/WriteHeader and
-// harness.ReadHeader.
+// TestHeaderWriteRead is a black-box round trip: Format writes the header and Header reads it back.
 func TestHeaderWriteRead(t *testing.T) {
 	tmpfile := "/tmp/test-luks-header.bin"
 	defer os.Remove(tmpfile)

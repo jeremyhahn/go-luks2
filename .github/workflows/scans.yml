@@ -1,23 +1,4 @@
-# scans-template: v1.0.0 (customized) — the scans on main.
-# ci-template v1.42 makes the CI Gate hermetic (owner ruling 742 (1)), so
-# every check that fails on the state of the world rather than on a change
-# runs here, and only here: `make deps-check`, `make security` (gosec,
-# govulncheck, go mod verify, trivy fs) and `trivy image` of the integration
-# image. It never runs on a pull_request or a push, and it is not the
-# workflow named CI, so a finding never reads as a red main and never blocks
-# a PR. A finding opens or updates ONE issue, found by its fixed title
-# (SCAN_ISSUE_TITLE), with the run link, and fails this job, so the Actions
-# run is red; a run with no finding closes that issue.
-#
-# CUSTOMIZE (go-luks2), against the template:
-#   - workflow_dispatch on main only, no `schedule:`: this repository's
-#     nightly run is suspended and TestNoScheduleTrigger allows no schedule.
-#   - Each check is its own step, named as it was in ci.yml, running through
-#     `make ci-toolchain-run` as ci.yml's stages do; the images are built as
-#     ci.yml's image job builds them (apk-index-sum, apt-index-sum,
-#     `make -s it-image`, `make docker-build`).
-#   - No bump half yet: the Makefile has no `make deps-bump`; it comes with
-#     the full ci-template catch-up.
+# Scans on main that fail on the state of the world (deps-check, security, trivy image); a finding opens or updates one issue and fails the run.
 
 name: Scans
 
@@ -89,9 +70,7 @@ jobs:
           rm -f "$RUNNER_TEMP/gomodauth.env"
           echo "TOOLCHAIN_IMAGE=$(make -s toolchain-image)" >> "$GITHUB_ENV"
 
-      # The checks that left ci.yml (ruling 742 (1)), each its own step with
-      # ci.yml's command, so a red one names itself. Each runs to the end
-      # (continue-on-error); "Collect the findings" lists the failed ones.
+      # Each check is its own step with ci.yml's command and runs to the end; "Collect the findings" lists the failed ones.
       - name: make deps-check (toolchain image)
         id: deps
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
@@ -108,8 +87,7 @@ jobs:
           IN_IMAGE_NETWORK: bridge
         run: make ci-toolchain-run CMD="make security GO_BUILD_TAGS='$GO_BUILD_TAGS'"
 
-      # CRITICAL and HIGH findings that have a fix: --ignore-unfixed (v1.19)
-      # and --skip-dirs /opt/go/mod (v1.20), as ci.yml ran it.
+      # Critical and high findings that have a fix, as ci.yml ran it.
       - name: trivy image (integration image)
         id: trivy
         if: ${{ !cancelled() && env.TOOLCHAIN_IMAGE != '' }}
@@ -139,10 +117,7 @@ jobs:
           echo "scans: ${fired:-none fired}"
           echo "fired=$fired" >> "$GITHUB_OUTPUT"
 
-      # ONE issue for the findings, found by its exact title among the open
-      # issues (pull requests excluded): created when none is open, its body
-      # replaced when one is, and closed with a comment by the first run with
-      # no finding.
+      # One issue for the findings, found by its exact title: created, updated, or closed by a run with no finding.
       - name: Open, update or close the scan issue
         if: ${{ !cancelled() && steps.scans.outcome == 'success' }}
         env:

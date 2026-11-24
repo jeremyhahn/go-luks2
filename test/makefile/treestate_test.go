@@ -14,21 +14,7 @@ import (
 	"testing"
 )
 
-// treeState returns a function reporting the state of the tree at root that
-// TestMain compares before and after the suite, and a cleanup to run after the
-// last call.
-//
-// In a checkout (root/.git exists) the state is gitStatus(root). A tree with
-// no .git -- the published archive, the integration image -- gets the same
-// guard without a repository of its own: the tree is committed, as it is at
-// the start of the suite, into a scratch repository outside it whose work tree
-// is root, and the state is `git status --porcelain` there. The tree's own
-// .gitignore files decide what is watched, as in a checkout, so the two agree
-// on what a test may not change; the snapshot is, if anything, stricter,
-// because a file already modified in a checkout shows the same status line
-// however often it is modified again. The scratch repository has no
-// templates, no system, global or XDG configuration and no inherited GIT_
-// variable, so nothing outside the tree changes what is watched.
+// treeState returns a function reporting the tree state TestMain compares, and a cleanup; without .git it commits the tree into a hermetic scratch repository.
 func treeState(root string) (func() (string, error), func(), error) {
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
 		return func() (string, error) { return gitStatus(root) }, func() {}, nil

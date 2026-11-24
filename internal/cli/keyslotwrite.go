@@ -173,11 +173,7 @@ func runChangeKey(ctx context.Context, e *env, args []string) error {
 	}
 	defer volumeKey.Destroy()
 
-	// KeyslotParams's zero Priority is PriorityDefault, so ChangeKeyslot keeps
-	// the slot's existing priority -- prefer, normal or ignore -- exactly as
-	// it was: a passphrase change does not re-prioritize the slot. kdf is
-	// zero unless a KDF option was given, so the slot keeps its cost unless
-	// the operator asked for a new one, as with luksChangeKey.
+	// Zero Priority and zero kdf keep the slot's existing priority and cost unless the operator asked otherwise, as luksChangeKey does.
 	if _, err := v.ChangeKeyslot(ctx, volumeKey, replacement, luks2.KeyslotParams{KDF: kdf}); err != nil {
 		return err
 	}

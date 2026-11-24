@@ -142,9 +142,7 @@ func TestRunnerLabelsManifest(t *testing.T) {
 		{"reject-release-push-ref-name.yml", "", "lint", releaseRunsOn},
 		{"reject-release-dispatch-branch.yml", "", "lint", releaseRunsOn},
 		{"reject-release-other-tag.yml", "", "lint", releaseRunsOn},
-		// GitHub compares strings case-insensitively and git refs are not:
-		// == 'refs/heads/main' also holds on a branch MAIN. A default branch
-		// (schedule) can have any name.
+		// GitHub compares strings case-insensitively; a schedule's default branch can have any name.
 		{"reject-release-push-main-case.yml", "", "lint", releaseRunsOn},
 		{"reject-release-dispatch-main-case.yml", "", "lint", releaseRunsOn},
 		{"reject-release-pr-head-ref-case.yml", "", "lint", releaseRunsOn},
@@ -199,8 +197,7 @@ func TestRunnerLabelsSelfTestStep(t *testing.T) {
 	if self < 0 || check < 0 || self > check {
 		t.Fatalf("preflight's %q step (at %d) does not come before %q (at %d)", runnerLabelsSelfTest, self, runnerLabelsStep, check)
 	}
-	// Resume 23 (Codex P1 on PR #495): the checker is a repository file,
-	// run as is, with no heredoc copy left in the step.
+	// The checker is a repository file, run as is.
 	step := stepBody(t, runnerLabelsStep)
 	if n := strings.Count(step, "\n          python3 -I "+runnerLabelsScript+"\n"); n != 1 {
 		t.Errorf("%q runs `python3 -I %s` %d times, want 1", runnerLabelsStep, runnerLabelsScript, n)
@@ -304,12 +301,7 @@ func TestBalancedRunnerPoolStepIsTheTemplates(t *testing.T) {
 	}
 }
 
-// TestRunnerSelectTestsPassOnTheStep: the carried template test data is the
-// template's, and every case passes against the step as ci.yml holds it. It
-// needs python3 and bash; without them (the toolchain image has no python3)
-// it skips, TestBalancedRunnerPoolStepIsTheTemplates still pins the step, and
-// ci.yml's preflight step "Runner select self-test" runs the harness in CI
-// (TestRunnerSelectSelfTestStep pins that step).
+// TestRunnerSelectTestsPassOnTheStep runs the template test data against ci.yml's step; it skips without python3 and bash.
 func TestRunnerSelectTestsPassOnTheStep(t *testing.T) {
 	// The repository ships no file that opens with #!, so the template's
 	// first line is carried here and the rest in testdata; together they

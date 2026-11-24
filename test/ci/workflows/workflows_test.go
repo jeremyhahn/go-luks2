@@ -70,9 +70,7 @@ var (
 	pinnedUses = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}\s+#\s+v\d[\w.-]*$`)
 )
 
-// TestEveryActionIsPinnedToACommit: a tag or branch can be moved to new code
-// after it was reviewed; a commit id cannot. trivy-action@master ran whatever
-// that branch held on the night it ran (#247).
+// TestEveryActionIsPinnedToACommit: a tag or branch can move; a commit id cannot.
 func TestEveryActionIsPinnedToACommit(t *testing.T) {
 	seen := 0
 	for _, path := range workflowFiles(t) {
@@ -121,9 +119,7 @@ func rel(t *testing.T, path string) string {
 
 var pipedInstall = regexp.MustCompile(`(curl|wget)\b[^|#]*\|\s*(sudo\s+)?(ba|z|da)?sh\b`)
 
-// TestNoPipedInstallScripts: `curl ... | sh` runs whatever the URL serves that
-// day, unreviewed and unverified (#247). Tools are installed from pinned
-// archives checked against a SHA-256 instead (make trivy-install).
+// TestNoPipedInstallScripts: tools install from pinned, SHA-256-checked archives, never `curl | sh`.
 func TestNoPipedInstallScripts(t *testing.T) {
 	files := append(workflowFiles(t), filepath.Join(repoRoot(t), "Makefile"))
 	for _, path := range files {
@@ -206,9 +202,7 @@ func TestReleaseGoVersionIsCIs(t *testing.T) {
 	}
 }
 
-// TestReleaseRequiresMainAndCIsGate: the release used to publish on any v* tag
-// with no dependency on CI (#247). The publishing job must need every stage,
-// check each by name, and the CI stage must be the release gate itself.
+// TestReleaseRequiresMainAndCIsGate: the publishing job needs every stage, and the CI stage is the release gate.
 func TestReleaseRequiresMainAndCIsGate(t *testing.T) {
 	wf := readFile(t, ".github/workflows/release.yml")
 
@@ -249,8 +243,7 @@ func TestReleaseRequiresMainAndCIsGate(t *testing.T) {
 	}
 }
 
-// TestReleaseTestsTheCLIAndRunsTheSecuritySuite (#247): only ./pkg/luks2 was
-// tested, and nothing was scanned.
+// TestReleaseTestsTheCLIAndRunsTheSecuritySuite.
 func TestReleaseTestsTheCLIAndRunsTheSecuritySuite(t *testing.T) {
 	wf := readFile(t, ".github/workflows/release.yml")
 	if test := job(t, wf, "test"); !regexp.MustCompile(`go test [^\n]*\./pkg/luks2 \./cmd/luks2`).MatchString(test) {
@@ -266,8 +259,7 @@ func TestReleaseTestsTheCLIAndRunsTheSecuritySuite(t *testing.T) {
 
 var goBuild = regexp.MustCompile(`\bgo build\b[^\n]*`)
 
-// TestReleaseAndCIBuildWithTrimpath: without -trimpath a binary records the
-// build host's paths (#247).
+// TestReleaseAndCIBuildWithTrimpath: without -trimpath a binary records build-host paths.
 func TestReleaseAndCIBuildWithTrimpath(t *testing.T) {
 	builds := 0
 	// Join shell line continuations so a command split over lines is read
@@ -315,10 +307,7 @@ func TestTagIsDataInRelease(t *testing.T) {
 	}
 }
 
-// TestMakefileSaysWhereTrivyGates: the Makefile claimed "CI installs trivy
-// unconditionally, so this scan still gates every push" while trivy ran only
-// nightly (#247). The comment must say where it actually gates, and ci.yml
-// must not have quietly started running it (which would make it wrong again).
+// TestMakefileSaysWhereTrivyGates: the Makefile names where trivy gates, and ci.yml does not run it.
 func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 	mk := readFile(t, "Makefile")
 	if strings.Contains(mk, "gates every push") {
@@ -328,9 +317,7 @@ func TestMakefileSaysWhereTrivyGates(t *testing.T) {
 		!strings.Contains(mk, "the NIGHTLY") {
 		t.Error("the Makefile does not say where trivy gates")
 	}
-	// What the Makefile says, the workflows must do: the full security
-	// target, trivy fs included, in scans.yml (ci-template v1.42, ruling 742
-	// (1)), and no trivy run in ci.yml.
+	// The full security target, trivy fs included, runs in scans.yml and not in ci.yml.
 	ci := readFile(t, ".github/workflows/ci.yml")
 	if scans, ok := readUnlessStripped(t, ".github/workflows/scans.yml"); ok && !strings.Contains(job(t, scans, "scans"), `make ci-toolchain-run CMD="make security `) {
 		t.Error("scans.yml no longer runs make security in the toolchain image; update the Makefile's account of where trivy gates")

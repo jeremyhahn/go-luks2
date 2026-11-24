@@ -10,12 +10,12 @@
 // Neither device-mapper nor loop devices are namespaced, so every dm mapping
 // and every loop device the integration suite creates is HOST state. That is a
 // property of the kernel, not of how the container is confined: dropping
-// --privileged for a scoped capability and device set (#80) changed what the
+// --privileged for a scoped capability and device set changed what the
 // container can reach and changed nothing here. When a run dies without cleaning up --
 // a failing test, a timeout, a container torn down mid-run -- that state
-// outlives it, and the #85 guard then correctly refuses every later run on that
+// outlives it, and the device-mapper guard then correctly refuses every later run on that
 // host because it cannot attribute what it finds. One failed run poisons a
-// runner until a human clears it by hand (#96).
+// runner until a human clears it by hand.
 //
 // # Why a write-ahead ledger, and not the obvious alternatives
 //
@@ -156,8 +156,7 @@ type Ledger struct {
 	path  string
 	name  string
 	runID string
-	// dir is the validated state directory's handle. The ledger is created,
-	// re-read and deleted through it, never by path (#247).
+	// dir is the validated state directory's handle; the ledger is used through it, never by path.
 	dir *trustedDir
 }
 
@@ -167,9 +166,7 @@ type Ledger struct {
 // directory EXCEPT the one belonging to the run asking, so a collision would
 // have a live run reaping its own state out from under itself.
 func OpenLedger(dir, runID string) (*Ledger, error) {
-	// The directory is part of the trust boundary; see statedir.go. Checked on
-	// the WRITER path as well as the reaper's, because a check on one path only
-	// is one an attacker routes around by racing the other.
+	// The directory is part of the trust boundary (statedir.go), checked on both writer and reaper paths.
 	if runID == "" || strings.ContainsAny(runID, `/\`) || runID == "." || runID == ".." {
 		return nil, &StateDirError{Dir: dir, Problem: "run id " + strconv.Quote(runID) + " cannot name a ledger"}
 	}
@@ -186,13 +183,7 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 		return nil, &LockFileError{Action: "opening", Path: path, Err: err}
 	}
 
-	// Hold an exclusive advisory lock for the life of the run. This is what
-	// tells a later reaper that this run is ALIVE, and it is the only signal
-	// that is trustworthy: the kernel releases the lock when the holder dies,
-	// including on SIGKILL, and it does not release it while the holder runs.
-	//
-	// It works across containers because flock is a property of the INODE, and
-	// the state directory is a bind mount -- every container sees the same one.
+	// Hold an exclusive flock for the run's life; the kernel releases it only when the holder dies, which tells a reaper the run is gone.
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		_ = f.Close()
 		_ = sd.Close()
@@ -207,7 +198,7 @@ func OpenLedger(dir, runID string) (*Ledger, error) {
 // It is the answer to the one question a reaper must get right, and the reason
 // it is asked this way rather than any other: on a shared runner several jobs
 // run at once, and a live job's loop device is indistinguishable from an orphan
-// by every other signal. Measured 2026-09-01 on a shared CI runner -- a live job's
+// by every other signal. Measured on a shared CI runner, a live job's
 // device showed empty `holders` and empty `fuser`, exactly like the orphans
 // swept minutes earlier. The ONLY thing separating them was that a job owned
 // it.
@@ -324,7 +315,7 @@ func (l *Ledger) Close() error {
 // and a ledger that is visible and unlocked is a dead run's ledger to any
 // other run's reaper: closing first let a sibling consume this run's record in
 // the window before the unlink, and this run's own Remove then failed a clean
-// run with ENOENT (Codex review on #247).
+// run with ENOENT.
 func (l *Ledger) Discard() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

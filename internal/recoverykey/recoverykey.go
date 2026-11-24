@@ -93,12 +93,7 @@ func Hash(credential enclave.ByteAccess) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-// renderInto renders key into dst, which must be exactly Len(len(key), f)
-// bytes.
-//
-// The dashed form is built by encoding the hex RIGHT-ALIGNED in dst and then
-// walking left to right inserting separators: the read cursor stays ahead of
-// the write cursor for every group, so the expansion needs no second buffer.
+// renderInto renders key into dst, which must be exactly Len(len(key), f) bytes, expanding in place.
 func renderInto(dst, key []byte, f Format) {
 	switch f {
 	case Base64:
@@ -219,9 +214,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 			})
 		}
 
-		// Not dashed. The hex test is on the lower-cased body, so a WRITABLE
-		// copy is taken to lower-case in: an enclave built from existing
-		// material is frozen read-only, and a write through it faults.
+		// Lower-case a writable copy; frozen enclaves fault on write.
 		normalized, err := c.CloneWritable("recovery key", body)
 		if err != nil {
 			return err
@@ -239,8 +232,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 				}
 			}
 
-			// base64 is case-sensitive, so it decodes the ORIGINAL body rather
-			// than the lower-cased copy.
+			// base64 is case-sensitive, so decode the original body.
 			if body[len(body)-1] == '=' || !isHex {
 				if k, err := decodeBase64(c, body); err == nil {
 					key = k
@@ -259,8 +251,7 @@ func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, 
 	return key, nil
 }
 
-// decodeHex decodes hex bytes DIRECTLY into locked memory. The caller has
-// already trimmed and lower-cased in place.
+// decodeHex decodes trimmed, lower-cased hex bytes directly into locked memory.
 func decodeHex(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := hex.DecodedLen(len(src))
 	invalid := &errs.Error{Kind: errs.ErrInvalidCredential, Detail: "recovery key is not valid hex"}
@@ -279,7 +270,7 @@ func decodeHex(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	return key, err
 }
 
-// decodeBase64 decodes base64 bytes DIRECTLY into locked memory.
+// decodeBase64 decodes base64 bytes directly into locked memory.
 func decodeBase64(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	n := base64.StdEncoding.DecodedLen(len(src))
 	if n == 0 {
@@ -290,14 +281,7 @@ func decodeBase64(c secret.Custody, src []byte) (enclave.ByteAccess, error) {
 	})
 }
 
-// decodeExact allocates maxLen bytes of locked scratch, lets decode fill it,
-// and returns an enclave holding exactly the bytes decode reported.
-//
-// The two steps exist because base64's DecodedLen is an upper bound -- padding
-// makes the real length shorter -- and an enclave sized from the bound would
-// hand back trailing zeros as part of the key. The scratch is destroyed once
-// the exact-sized enclave has been filled, so the surplus is wiped rather than
-// merely ignored, and the caller's handle never aliases it.
+// decodeExact decodes into maxLen bytes of locked scratch and returns an enclave of exactly the decoded length.
 func decodeExact(c secret.Custody, maxLen int, decode func(dst []byte) (int, error)) (enclave.ByteAccess, error) {
 	scratch, err := c.New("recovery key", maxLen)
 	if err != nil {

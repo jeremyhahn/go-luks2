@@ -113,28 +113,14 @@ type Report struct {
 func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 	var report Report
 
-	// ONE REAPER AT A TIME ON THIS HOST.
-	//
-	// Without this, two reapers starting together are indistinguishable from a
-	// reaper and a live suite: reaper A takes a stale ledger's lock, reaper B
-	// gets EWOULDBLOCK and classifies it as "the owner is still alive". B then
-	// returns success and proceeds -- even though A may still be working, or
-	// may have FAILED and left the recorded state exactly where it was. The
-	// fail-closed path would have been defeated by a lock B misread.
-	//
-	// Serializing the reapers removes the ambiguity at its source: while this
-	// lock is held, a ledger lock can only be a live SUITE, which is the one
-	// thing it is supposed to mean. B waits for A, then does its own pass over
-	// whatever A left -- so if A failed, B fails too, which is the required
-	// direction.
+	// One reaper at a time on this host, so a locked ledger always means a live suite.
 	sd, unlock, err := lockReaper(dir)
 	if err != nil {
 		return report, err
 	}
 	defer unlock()
 
-	// Every ledger is listed, locked, read and deleted through the handle
-	// lockReaper validated, never by path again (#247).
+	// Every ledger is handled through the handle lockReaper validated, never by path.
 	names, err := staleLedgers(sd, selfRunID)
 	if err != nil {
 		return report, err
@@ -146,23 +132,7 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 
 	for _, name := range names {
 		path := filepath.Join(sd.path, name)
-		// LIVENESS FIRST, before the file is even read.
-		//
-		// Several jobs run concurrently on one runner, so a ledger in this
-		// directory may belong to a suite that is running right now. Its
-		// mappings and loop devices are in USE, and removing them fails a
-		// different run in a way that reads as a flaky test on a host that
-		// looks clean -- strictly worse than the leak, which at least fails
-		// loudly and is recoverable by a human.
-		//
-		// The owner's lock is the only trustworthy signal. Nothing about the
-		// device distinguishes a live job's from an orphan: measured
-		// 2026-09-01 on a shared CI runner, a live job's loop device showed empty
-		// holders and empty fuser, exactly like the orphans swept minutes
-		// before.
-		// Cannot establish whether the owner is alive: that is UNKNOWN state,
-		// and unknown still fails closed. See the exit-code policy below for
-		// why a failure to REMOVE does not.
+		// Check liveness first through the owner's lock, the only trustworthy signal; if it cannot be determined, fail closed.
 		dead, release, err := tryLockIn(sd, name)
 		if err != nil {
 			return report, fmt.Errorf("%w: could not establish whether the run owning %s is alive: %v",
@@ -173,11 +143,7 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 			report.LedgersSkippedAlive = append(report.LedgersSkippedAlive, path)
 			continue
 		}
-		// Released at the end of THIS iteration rather than deferred to the
-		// end of Reap: a host that has accumulated many dead runs would
-		// otherwise hold one open descriptor and one lock per ledger for the
-		// whole sweep, which is a leak in the code whose entire job is to stop
-		// leaks.
+		// Released at the end of this iteration, not deferred, so a sweep holds one lock at a time.
 		outcome := reapLedger(sd, name, rm, w, &report)
 		release()
 
@@ -192,32 +158,7 @@ func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 		len(report.Removed), len(report.AlreadyGone), len(report.NotOurs),
 		len(report.DirsLeft), len(report.Unremoved))
 
-	// EXIT-CODE POLICY: a DEVICE left behind refuses the run; a DIRECTORY does
-	// not. The line is between live host state and disk.
-	//
-	// I softened this to non-fatal for both, on the evidence that a stuck
-	// device had latched a runner permanently. That evidence was my own defect:
-	// an empty lo_file_name was read as "already free", so LOOP_CLR_FD was
-	// never called and the device could never clear. Fixed and proven on the
-	// live device. With that gone, no case we can actually produce makes a
-	// device permanently unremovable -- a live holder sets LO_FLAGS_AUTOCLEAR
-	// and resolves when it exits, and a leaked holder needs a human either way.
-	// So the reversal was correct about disk and wrong about devices, and it
-	// was wrong because it generalised from a bug.
-	//
-	// The substance is that the #85 guard CANNOT cover this. It inventories
-	// `dmsetup ls`, so a retained dm mapping is caught there -- but a retained
-	// LOOP device passes it untouched, goes on to consume minors toward #104's
-	// threshold, and reaches the suite as a resource the host quietly no longer
-	// has. Continuing on that is running on a contaminated host.
-	//
-	// A DIRECTORY is different in kind: the guard never looks at it, no run
-	// trips over it, and the only cost is space. It is reported, the record is
-	// kept, and a later run retries -- see reapLoopRoot.
-	//
-	// UNKNOWN still fails closed and always did: an untrusted state directory,
-	// an unreadable ledger, or a liveness check that cannot answer return an
-	// error above, because then the reaper does not know what is on the host.
+	// A device left behind fails the reap; a directory left behind is reported and retried later; unknown state fails closed.
 	for _, f := range report.Unremoved {
 		fmt.Fprintf(w, "reap: NOT REMOVED: %s %q: %v -- record kept, will retry\n",
 			f.Entry.Kind, f.Entry.Value, f.Err)
@@ -293,9 +234,7 @@ func reapLedger(sd *trustedDir, name string, rm Remover, w io.Writer, report *Re
 // ReapOwn removes what THIS run recorded and has not already cleaned up,
 // against its own still-locked ledger.
 //
-// It exists because of a defect measured on real hardware (a privileged CI
-// runner, 2026-09-01)
-// that no amount of local reasoning had surfaced: a suite can PASS and still
+// It exists because of a defect measured on a privileged CI runner that no amount of local reasoning had surfaced: a suite can PASS and still
 // leak. TestLoopDeviceCleanup left /dev/loop1 attached while `go test` reported
 // ok, and the run then discarded its ledger on the strength of the exit code --
 // destroying the only record of the device it had just leaked. The next run
@@ -419,13 +358,7 @@ func reapEntry(entry Entry, runID string, rm Remover, w io.Writer) (outcome, err
 	}
 }
 
-// reapMapping removes a dm target only where the live one is the one recorded.
-//
-// The identity check is the difference between this and a name sweep. dm names
-// are a flat, host-wide namespace, so between the record and this reap another
-// process can have removed our mapping and created its own under the same name.
-// Removing "the target called test-mount" would then destroy a stranger's
-// device on the strength of a name we happen to also use.
+// reapMapping removes a dm target only where the live one carries the recorded identity.
 func reapMapping(entry Entry, rm Remover, w io.Writer) (outcome, error) {
 	uuid, present, err := rm.MappingIdentity(entry.Value)
 	if err != nil {
@@ -445,15 +378,7 @@ func reapMapping(entry Entry, rm Remover, w io.Writer) (outcome, error) {
 		return outcomeNotOurs, err
 	}
 
-	// Removal is confirmed rather than assumed. A remove that returns nil and
-	// leaves the target live would otherwise be reported as a successful reap,
-	// and the next run would fail on the guard with this one claiming success.
-	//
-	// A verification that ERRORS is a failure, not a pass. It is the difference
-	// between "the mapping is gone" and "I could not find out", and treating
-	// the second as the first is a check that reports clean precisely when it
-	// cannot see -- which then lets the ledger be deleted, destroying the only
-	// record of state nobody has confirmed is gone.
+	// Confirm the removal; a verification that errors is a failure.
 	stillThere, err := confirmMappingGone(rm, entry.Value)
 	if err != nil {
 		return outcomeNotOurs, fmt.Errorf("removed dm %q but could not confirm it is gone: %w", entry.Value, err)
@@ -466,13 +391,7 @@ func reapMapping(entry Entry, rm Remover, w io.Writer) (outcome, error) {
 	return outcomeRemoved, nil
 }
 
-// reapLoop releases every loop device still backed by the recorded file.
-//
-// The path is what was recorded before the device existed, and the kernel is
-// what says which device carries it -- so ownership here is by record AND
-// observation, never by device number. The kernel keeps reporting the path
-// after the file itself is gone, marked "(deleted)", which is what makes this
-// work at all for a container that has since been torn down.
+// reapLoop releases every loop device still backed by the recorded file, as the kernel reports it (including "(deleted)").
 func reapLoop(entry Entry, rm Remover, w io.Writer) (outcome, error) {
 	devices, err := rm.LoopDevicesFor(entry.Value)
 	if err != nil {
@@ -504,19 +423,7 @@ func reapLoop(entry Entry, rm Remover, w io.Writer) (outcome, error) {
 	return outcomeRemoved, nil
 }
 
-// detachSettleTimeout bounds how long a detach is given to become observable in
-// sysfs, and detachSettlePoll is how often that is re-checked.
-//
-// A successful LOOP_CLR_FD is not necessarily visible immediately: the kernel
-// finishes the release asynchronously, and loopdev.go's DetachLoopDevice waits
-// for this exact race with a measurement behind it (~0.5ms on an idle host,
-// generous bound because CI runners are not idle). Re-querying instantly here
-// would turn a successful cleanup into ErrReapIncomplete and fail the NEXT
-// integration run over a device that was already on its way out.
-//
-// Reaching the bound therefore means something still HOLDS the device, not that
-// the host is slow -- which is why it is reported rather than waited out
-// further.
+// detachSettleTimeout bounds how long a detach takes to show in sysfs, re-checked every detachSettlePoll; reaching it means something holds the device.
 var (
 	detachSettleTimeout = 10 * time.Second
 	detachSettlePoll    = 50 * time.Millisecond
@@ -538,24 +445,7 @@ func waitForNoDevices(query func() ([]LoopDevice, error)) ([]LoopDevice, error) 
 	}
 }
 
-// reapLoopRoot releases every loop device backed by a file under a directory
-// this suite created.
-//
-// The prefix is not a heuristic. The recorded value is a directory made by
-// os.MkdirTemp for one run, so a backing file underneath it was put there by
-// that run and by nothing else. What the kernel supplies is which device
-// carries it -- observation again, against a path recorded first.
-//
-// THE NAME MUST CARRY THE RUN'S ID (#247). Each container has its own /tmp,
-// and the kernel reports a backing file by the path its container saw, so two
-// containers' run roots are told apart by NAME alone. MkdirTemp's suffix is 32
-// random bits, so a dead run's root and a live sibling's could share a name,
-// and reaping the dead one would detach the live one's devices. BeginSuite now
-// names the root go-luks2-run-<run id>-<n>, and a root is reaped only for the
-// run whose ledger carries that id. A root that is not (an older ledger, or a
-// damaged one) with devices under it is left alone and fails the reap; with
-// none, the record is consumed and the directory, which may be someone
-// else's, is left where it is.
+// reapLoopRoot releases every loop device backed under a run root this suite created; the root is reaped only for the run whose id its name carries, else left alone.
 func reapLoopRoot(entry Entry, runID string, rm Remover, w io.Writer) (outcome, error) {
 	devices, err := rm.LoopDevicesUnder(entry.Value)
 	if err != nil {
@@ -571,17 +461,9 @@ func reapLoopRoot(entry Entry, runID string, rm Remover, w io.Writer) (outcome, 
 		return outcomeAlreadyGone, nil
 	}
 
-	// NO DEVICES DOES NOT MEAN NOTHING TO DO. An early return here left a dead
-	// run's temp root -- and the disk images in it -- on the runner whenever
-	// its loop devices had already been released, which is the ordinary way a
-	// killed run looks once the kernel has autocleared. The devices were the
-	// urgent half; the directory is the half that accumulates.
+	// No devices still leaves the directory to remove.
 	for _, d := range devices {
-		// The expectation is the backing observed during ENUMERATION -- what
-		// made this device ours -- not a value re-read now. The root is what
-		// establishes ownership; the observed path is what identifies THIS
-		// device, and a re-read would simply report the reassignment and agree
-		// with it.
+		// The expectation is the backing observed during enumeration, not a value re-read now.
 		if err := rm.DetachLoop(d); err != nil {
 			return outcomeNotOurs, fmt.Errorf("detaching %s (backed under %s): %w", d.Path, entry.Value, err)
 		}
@@ -603,32 +485,7 @@ func reapLoopRoot(entry Entry, runID string, rm Remover, w io.Writer) (outcome, 
 			remaining, entry.Value, detachSettleTimeout)
 	}
 
-	// The DIRECTORY goes too, and only now that nothing is backed by anything
-	// inside it. A killed run's temp root holds the disk images its tests
-	// created -- tens of megabytes each -- and detaching the devices while
-	// leaving the files behind fills the runner one dead run at a time. The
-	// devices were the urgent half; this is the half that accumulates.
-	// A DIRECTORY THAT WILL NOT DIE MUST NOT POISON THE RUNNER.
-	//
-	// This is deliberately NOT fatal, and the asymmetry with the device paths
-	// above is the whole point. A device left behind is invisible to attribution
-	// and blocks the #85 guard, so failing to remove one means the host is not
-	// safe and the run must refuse. A directory is disk: the guard never looks
-	// at it, no other run trips over it, and the only cost is space.
-	//
-	// Treating them the same latches. Trace it: an immutable file or a busy
-	// mount makes RemoveDir fail permanently; a fatal return keeps the ledger
-	// "so the next run can finish the job"; the next run reads the same ledger,
-	// fails on the same directory, keeps it again -- and the entrypoint refuses
-	// every integration job on that host from then on. That is precisely the
-	// runner-poisoning this package exists to remove, reintroduced by the
-	// cleanup that removes it, and it is the same shape as the unbound-loop
-	// refusal that actually did poison a runner for hours, until a human cleared
-	// it by hand.
-	//
-	// So: report it, KEEP the ledger so a later run retries, and let the run
-	// proceed. The record survives, the operator is told, and nothing is
-	// blocked on a condition that endangers nothing.
+	// Remove the directory once nothing is backed inside it; a failure is reported and the ledger kept, but the run is not refused.
 	dirLeft := false
 	if err := rm.RemoveDir(entry.Value); err != nil {
 		fmt.Fprintf(w, "reap: WARNING: every loop device under %q is gone, but the directory could not be "+
@@ -659,23 +516,7 @@ func confirmMappingGone(rm Remover, name string) (stillThere bool, err error) {
 	return present, nil
 }
 
-// inRemovalOrder returns entries with HOLDERS before the things they hold: dm
-// mappings first, then the loop devices underneath them.
-//
-// The ledger's write order is the opposite, and not by accident. BeginSuite
-// records the run's loop root before a single test runs -- that is what makes
-// the record precede the resource -- while dm mappings are recorded later, as
-// each test creates one. So a killed run that left a LUKS mapping stacked on a
-// loop device produces a ledger whose loop entry comes first.
-//
-// Reaping in that order tries to detach a loop device while a dm target is
-// still sitting on it. The kernel defers the release, the verification a moment
-// later still sees the device, and the reaper reports ErrReapIncomplete for
-// state it is perfectly capable of removing -- the entrypoint then exits
-// non-zero and the stale run needs a second pass to clear. Removing the holder
-// first makes one pass enough.
-//
-// The sort is stable, so entries of the same kind keep their ledger order.
+// inRemovalOrder returns dm mappings before the loop devices under them, stably, so one pass suffices.
 func inRemovalOrder(entries []Entry) []Entry {
 	ordered := make([]Entry, len(entries))
 	copy(ordered, entries)
@@ -698,14 +539,7 @@ func removalRank(k Kind) int {
 // ledger, and staleLedgers ignores it: it carries no .ledger suffix.
 const reaperLockName = ".reap.lock"
 
-// reaperLockTimeoutForTest bounds the wait for another reaper. It is a var so
-// the timeout path itself can be tested; nothing outside tests reassigns it.
-//
-// It is generous because the thing being waited for is a full reap of a
-// poisoned host, not a fast path, and because giving up early is the failure
-// this exists to avoid -- a reaper that times out and proceeds is a reaper that
-// runs on a host in an unknown state. Reaching the bound means something is
-// wedged, which is reported rather than assumed away.
+// reaperLockTimeoutForTest bounds the wait for another reaper; a var only for tests.
 var reaperLockTimeoutForTest = 5 * time.Minute
 
 // rootBelongsToRun reports whether root is named the way BeginSuite names
@@ -723,7 +557,7 @@ func rootBelongsToRun(root, runID string) bool {
 // releases the mutex and closes the directory.
 func lockReaper(dir string) (*trustedDir, func(), error) {
 	// Validated here too, not only in OpenLedger: this is the privileged side,
-	// it runs before the #85 guard, and it acts on whatever the ledgers say.
+	// it runs before the device-mapper guard, and it acts on whatever the ledgers say.
 	sd, err := openTrustedStateDir(dir)
 	if err != nil {
 		return nil, nil, err

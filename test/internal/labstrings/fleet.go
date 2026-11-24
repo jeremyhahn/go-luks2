@@ -39,15 +39,7 @@ var (
 	shapeMount = regexp.MustCompile(`/mnt/([[:alpha:]]+)`)
 )
 
-// This file is the fleet pattern set. A pattern is a shape above and the
-// digests of the fleet values that shape may match (Digest); the values
-// themselves are written nowhere in this repository. A new fleet subnet, port
-// or host family is one digest here, computed outside the tree.
-//
-// Note what is NOT here: private address space at large. Tests across this
-// tree use RFC 1918 literals as opaque addresses that are never dialed, and
-// banning the whole space would bury the real findings under hundreds of them.
-// The fleet subnet is named precisely instead, by the digest of its /24.
+// The fleet pattern set: shapes and the digests of the fleet values each may match; RFC 1918 space at large is not banned.
 func init() {
 	fleet = []Pattern{
 		{
@@ -108,7 +100,7 @@ func init() {
 			Guidance: "name the role, not the machine: agent-01, ci-runner-01",
 		},
 		{
-			// The coordinator hosts.
+			// The control hosts.
 			Class:    ClassLabHost,
 			Expr:     shapeLetteredHost,
 			Digests:  []string{"0fcd568a5cb9bdb4677b69354b11ee415af8f784519cff3da49a26f84eaee7f2"},

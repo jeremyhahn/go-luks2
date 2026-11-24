@@ -265,10 +265,7 @@ func TestToolchainBuildsGosecAgainstThePinnedXTools(t *testing.T) {
 	}
 }
 
-// TestToolchainDoesNotStampVCSIntoTheReadOnlyModuleCache: with tags in the
-// checkout, go build resolves the main module's version and writes a stat
-// cache under GOMODCACHE, which in the image is root's and only readable to
-// the stage uid; every build printed "writing stat cache: permission denied".
+// TestToolchainDoesNotStampVCSIntoTheReadOnlyModuleCache: builds do not write a stat cache into the read-only GOMODCACHE.
 func TestToolchainDoesNotStampVCSIntoTheReadOnlyModuleCache(t *testing.T) {
 	dockerfile, err := os.ReadFile(filepath.Join(repoRoot(t), "build/docker/devcontainer/Dockerfile")) // #nosec G304 -- the repository's own Dockerfile
 	if err != nil {
@@ -536,15 +533,7 @@ func makeRecipe(t *testing.T, makefile, target string) string {
 	return ""
 }
 
-// make verify must never pass over a module cache that holds no module
-// sources. `go mod verify` checks only the zips already cached: given the
-// go.mod files it needs to load the graph and nothing else -- what an empty
-// cache holds after the graph loads through an open GOPROXY, as in CI's
-// security step -- it verified nothing and printed "all modules verified".
-//
-// The fixture is built from nothing the local module cache must hold, so it
-// runs the same with GOPROXY=off over an empty cache: a module file naming one
-// dependency whose go.mod, and only its go.mod, is in a new cache.
+// make verify fails over a module cache holding no module sources, which go mod verify alone accepts; the fixture runs with GOPROXY=off.
 func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	goBin := lookPath(t, "go")
 	conf := t.TempDir()
@@ -596,13 +585,7 @@ func TestVerifyFailsOnAModuleCacheWithoutSources(t *testing.T) {
 	}
 }
 
-// verifyFixtureEnv is the environment the verify fixture runs in: the caller's
-// environment with caller set on top, then the fixture's cache and module file.
-// The go settings a caller can carry are pinned: no go env file, no private
-// module patterns (a match goes direct, past GOPROXY=off, to the network), no
-// workspace (which refuses -modfile) and the go on PATH (any other toolchain is
-// a module the cache lacks). Every proxy names a closed port, so a lookup that
-// still escapes GOPROXY=off fails at once instead of reaching a module host.
+// verifyFixtureEnv is the verify fixture's environment, with go settings pinned and every proxy on a closed port.
 func verifyFixtureEnv(caller map[string]string, cache, modfile string) []string {
 	const closed = "http://127.0.0.1:1"
 	base := environFrom(os.Environ(), nil, caller)

@@ -99,18 +99,12 @@ func CalibratePBKDF2(ctx context.Context, hashFunc func() hash.Hash, hashAlgo st
 			return 0, err
 		}
 
-		// Compared as a Duration, never as elapsed.Milliseconds(). Truncating
-		// a sub-millisecond measurement to an integer is what made the
-		// original extrapolation unreachable; truncating a 1ms one is what
-		// made it wrong by up to 3x on the occasions it was reached.
+		// Compare as a Duration; truncating to milliseconds loses precision.
 		if elapsed >= probeFloor {
 			return ScalePBKDF2Iterations(hashAlgo, probe, elapsed, targetMs), nil
 		}
 
-		// Checked after the probe rather than before, so the ceiling bounds
-		// the largest probe actually RUN. Doubling past it would double the
-		// work again for a measurement that has already failed to be
-		// timeable.
+		// Checked after the probe, so the ceiling bounds the largest probe run.
 		if probe > probeCeiling/2 {
 			return 0, &CalibrationError{
 				Hash:     hashAlgo,
@@ -136,11 +130,7 @@ func ScalePBKDF2Iterations(hashAlgo string, probe int, elapsed time.Duration, ta
 		scaled = floor
 	}
 
-	// MaxKDFIterations is the ceiling ValidateCost applies when the header is
-	// read back, so exceeding it here would write a keyslot this package
-	// would then refuse to open. Clamping is also what keeps the conversion
-	// below defined -- Go leaves an out-of-range float-to-int conversion
-	// implementation-specific.
+	// Clamp to MaxKDFIterations so the keyslot stays readable and the float conversion stays defined.
 	if scaled > MaxKDFIterations {
 		scaled = MaxKDFIterations
 	}

@@ -255,17 +255,7 @@ func (v *Volume) restorePrimaryHeader(ctx context.Context, op string, force bool
 	return nil
 }
 
-// readCurrentHeader reads the header copy cryptsetup would use -- the valid
-// one with the higher sequence id, the primary at a tie (header.ReadCurrentHeader)
-// -- with the checksum-algorithm reclassification every header read applies.
-//
-// Every reader goes through it. A reader under the shared lock (Unlock,
-// Header) uses the chosen copy and leaves the medium alone; here this package
-// DEVIATES from cryptsetup, whose LUKS2_hdr_read, finding a stale copy, takes
-// the write lock and rewrites it as part of the read. A shared lock does not
-// permit a write, and promoting it would let a read block on, or race, a
-// writer. The stale copy is rewritten by the next operation that holds the
-// exclusive lock (keyslotDevice.readHeader), or by RestorePrimaryHeader.
+// readCurrentHeader reads the copy cryptsetup would use; unlike cryptsetup, a shared-lock read never rewrites a stale copy.
 func readCurrentHeader(r io.ReaderAt) (*header.CurrentHeader, error) {
 	cur, err := header.ReadCurrentHeader(r)
 	if err != nil {
@@ -274,33 +264,13 @@ func readCurrentHeader(r io.ReaderAt) (*header.CurrentHeader, error) {
 	return cur, nil
 }
 
-// repairHeaderCopies rewrites the stale header copy from the current one,
-// under the exclusive lock the caller holds, before the caller's own
-// read-modify-write: the repair cryptsetup's LUKS2_hdr_read makes.
-//
-// As in cryptsetup the sequence id is not advanced: the repaired copy becomes
-// the current one again, at the same generation. A stale secondary is
-// rewritten alone, after the primary is made durable. A stale primary is
-// rewritten through the ordinary two-copy writer, which puts the primary on
-// the medium first and then rewrites the secondary from the same metadata;
-// cryptsetup writes the primary alone, but at every instant of either order
-// one copy is complete and current, so a crash part way loses nothing.
-//
-// The repair reproduces a copy already on the medium and authors nothing, so,
-// like restorePrimaryHeaderCore, it is held to the header-wide rules the copy
-// passed when it was read and not to the per-entry ones a write applies: a
-// damaged entry must not stop the repair that precedes its removal.
-//
-// It is one write step (keyslotWriteStep), uncancellable as a rollback is:
-// readHeader has no context, and a repair left half-done by a cancellation
-// would be the state it exists to remove.
+// repairHeaderCopies rewrites the stale copy from the current one at the same sequence id under the caller's exclusive lock, as one uncancellable write step.
 func repairHeaderCopies(d *keyslotDevice, cur *header.CurrentHeader) error {
 	op := "repair the secondary LUKS2 header"
 	if cur.Offset != header.PrimaryHeaderOffset {
 		op = "repair the primary LUKS2 header"
 	}
-	// The reader accepts header areas the writer refuses (#50); a copy written
-	// at such an area would land inside the primary's own JSON area.
+	// The reader accepts header areas the writer refuses; such a copy would land inside the primary's JSON area.
 	if _, err := header.HeaderAreaSizeForWrite(cur.Header); err != nil {
 		return err
 	}

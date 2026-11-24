@@ -18,19 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Custody tests.
-//
-// These do not check that the code runs -- the rest of the suite does that.
-// They check WHERE key material lives: that a function hands back a handle to
-// locked memory rather than a slice, that a borrow window is closed when the
-// borrow returns, that material is released on the failure path as well as the
-// success path, and that the locked pages actually go back to the kernel.
-//
-// A second group pins the rewrites that the enclave work required, against
-// reference implementations of the code they replaced. Those rewrites are on
-// paths that decide whether a container can be read back at all, so "it still
-// round-trips through this package" is not sufficient evidence: the reference
-// implementations here are what make a behavioral drift visible.
+// Custody tests check where key material lives and is released, and pin the enclave rewrites against reference implementations.
 
 func TestDerivedEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	iterations := 1000
@@ -64,10 +52,7 @@ func TestDerivedEnclaveAgreesWithTheUnprotectedDerivation(t *testing.T) {
 	}
 }
 
-// TestDerivedEnclaveHandsBackAnEnclaveNotASlice asserts the custody property
-// itself rather than the value: what comes back can be DESTROYED, and reading
-// it afterwards fails. A []byte return has neither property -- a caller who
-// forgets to wipe one gets no error, just a live copy of the key.
+// TestDerivedEnclaveHandsBackAnEnclaveNotASlice: the result can be destroyed, and reading it afterwards fails.
 func TestDerivedEnclaveHandsBackAnEnclaveNotASlice(t *testing.T) {
 	iterations := 1000
 	kdf := &header.KDF{
@@ -198,14 +183,7 @@ func TestUnlockKeyslotHoldsTheMasterKeyInProtectedMemory(t *testing.T) {
 	}
 }
 
-// TestFailedUnlocksReleaseEveryLockedRegion is the failure-path half.
-//
-// A wrong passphrase runs the whole of unlockKeyslot -- derivation, a 256 KiB
-// locked decryption buffer, an AF merge into another locked region -- and then
-// throws all of it away. Nothing returns a handle to the caller on that path,
-// so a missed Destroy is invisible except as locked memory that never comes
-// back. Sixteen attempts against a real container would strand several
-// megabytes if any of them leaked.
+// TestFailedUnlocksReleaseEveryLockedRegion: failed unlocks leave no locked memory behind.
 func TestFailedUnlocksReleaseEveryLockedRegion(t *testing.T) {
 	path := newImage(t, "custody-failure.img")
 	formatWithLibrary(t, path)
@@ -223,11 +201,7 @@ func TestFailedUnlocksReleaseEveryLockedRegion(t *testing.T) {
 
 	before := lockedKiB(t)
 
-	// Four rounds, not sixteen. The signal is the SIZE of a leaked region, not
-	// the count: each failed unlock locks a 256 KiB stripe buffer and the
-	// tolerance below is one page, so a single leak is sixty-four times the
-	// threshold and one round would show it. Sixteen rounds cost 86 seconds on
-	// a CI runner and bought nothing the fourth did not.
+	// Four rounds: one leaked 256 KiB region is far above the one-page tolerance.
 	const attempts = 4
 	for i := 0; i < attempts; i++ {
 		key, err := getMasterKey(path, []byte(conformanceWrongPassphrase), metadata, testVolumeSys())
@@ -317,9 +291,7 @@ func TestUnlockKeyslotRefusesAnAbsurdKeyslotArea(t *testing.T) {
 	}
 }
 
-// TestRecoveryKeyIsHeldInProtectedMemory guards the part of a recovery key that
-// is easiest to leave behind: the printable form, which used to be a plain Go
-// string that could never be wiped -- and which is now the credential itself.
+// TestRecoveryKeyIsHeldInProtectedMemory covers the printable recovery key.
 func TestRecoveryKeyIsHeldInProtectedMemory(t *testing.T) {
 	key, err := NewRecoveryKey()
 	if err != nil {

@@ -22,7 +22,7 @@ const (
 	// cannot mistake a backup header for the start of a container. cryptsetup
 	// enforces this: a second copy carrying the primary magic is not read as a
 	// header at all, so the backup written for the case of a damaged primary is
-	// unusable for exactly the repair it exists to perform (#64).
+	// unusable for exactly the repair it exists to perform.
 	SecondaryMagic = "SKUL\xba\xbe"
 
 	MagicLen    = 6
@@ -115,8 +115,8 @@ type Metadata struct {
 	// every intact header.
 	//
 	// It is diagnostic state on a type that otherwise models on-disk
-	// structure, and that is a deliberate trade rather than an oversight
-	// (#27). The alternatives were worse: a logger in a Layer-0 primitive
+	// structure, and that is a deliberate trade rather than an oversight.
+	// The alternatives were worse: a logger in a Layer-0 primitive
 	// imposes a logging decision on every embedding application, a variadic
 	// option on ReadHeader permanently widens the package's simplest entry
 	// point to serve a rare diagnostic, and a second sibling read invites
@@ -160,18 +160,7 @@ const (
 	DroppedKindToken   = "token"
 )
 
-// ensureRequiredObjects initializes the mandatory LUKS2 JSON objects that are
-// nil, so they marshal as `{}` rather than `null`.
-//
-// It is called on the single path that serializes metadata to disk rather than
-// at each construction site: metadata reaches that path both from Format (which
-// builds it) and from ReadHeader (which parses it, and yields nil maps for any
-// object a foreign writer omitted), and only one of those is under this
-// package's control.
-//
-// Config is deliberately NOT invented here. An empty config object would pass
-// the presence check and then fail on its mandatory json_size/keyslots_size
-// members, turning a missing-config bug into a harder-to-read one.
+// ensureRequiredObjects initializes nil mandatory objects so they marshal as {} rather than null; Config is never invented.
 func (m *Metadata) ensureRequiredObjects() {
 	if m.Keyslots == nil {
 		m.Keyslots = make(map[string]*Keyslot)
@@ -208,10 +197,7 @@ type Keyslot struct {
 	// one of type "reencrypt", so they carry omitempty: a keyslot legitimately
 	// has neither, and LUKS2 has more than one keyslot type.
 	//
-	// They carried none from before this package's first release until #143 --
-	// so every version shipped so far writes the nulls described below, and
-	// this is a fix to existing behavior rather than to anything #143
-	// introduced. The reasoning was that a nil AF is a caller bug and
+	// Earlier releases wrote the nulls described below. The reasoning was that a nil AF is a caller bug and
 	// `"af": null` makes it visible. The goal was right and the place was
 	// wrong. Serialization describes what IS there; asserting what OUGHT
 	// to be there is validateKeyslot's job, and it already does exactly this
@@ -235,7 +221,7 @@ type Keyslot struct {
 	// members alike -- so the af/kdf check is never reached. This package
 	// cannot currently produce -- or even read -- a container that gets past
 	// that point: LUKS2 spells config.requirements as an object with a
-	// mandatory array and Config models it as []string, which is #152. The
+	// mandatory array and Config models it as []string. The
 	// justification is fidelity: an object this package did not create goes
 	// back the way it came.
 	AF   *AntiForensic `json:"af,omitempty"`
@@ -303,12 +289,7 @@ type AntiForensic struct {
 	unknown unknownFields
 }
 
-// The token types systemd defines and dispatches on.
-//
-// The type string is not documentation: systemd-cryptsetup switches on it to
-// decide which unlock plugin gets the token, so a token spelled anything else
-// is one systemd will not look at. These are the literals in the systemd 255
-// binary.
+// The token types systemd-cryptsetup dispatches on, as spelled in systemd 255.
 const (
 	// TokenTypeSystemdFIDO2 is the token systemd-cryptenroll --fido2-device
 	// writes.
@@ -348,12 +329,7 @@ type Token struct {
 	FIDO2UPRequired        *bool `json:"fido2-up-required,omitempty"`
 	FIDO2UVRequired        *bool `json:"fido2-uv-required,omitempty"`
 
-	// NO TPM2 FIELDS, deliberately (#189). go-xkms owns all hardware and
-	// cloud crypto -- TPM2, PKCS#11, the KMS backends -- and this is a
-	// Layer 0 library that carries none of it. A systemd-tpm2 token is not
-	// lost by that: every member this package does not model is carried
-	// through a read-modify-write by the passthrough below, byte for byte,
-	// so the token survives a header rewrite exactly as systemd wrote it.
+	// No TPM2 fields: a systemd-tpm2 token round-trips through the unmodeled-member passthrough.
 
 	unknown unknownFields
 }
@@ -434,9 +410,8 @@ type Digest struct {
 	// The external reader is cryptsetup, which uses the same coverage to
 	// decide which digest validates which keyslot. That reader is why the
 	// field could never have been deleted as unused even while nothing here
-	// read it -- #32 exists because "never read internally" is not "unused",
-	// and it recorded the external reader by name so nobody reached for the
-	// delete key. The internal reader has since landed, so the two now agree:
+	// read it: "never read internally" is not "unused". The internal reader
+	// now exists too, so the two agree:
 	// a header's coverage means the same thing to this library and to
 	// cryptsetup, rather than being enforced by one and ignored by the other.
 	//
@@ -455,7 +430,7 @@ type Digest struct {
 	// them, and they are omitted when nil. They are modeled rather than left
 	// in the unknown-member passthrough because a foreign header that DOES
 	// carry one has to be evaluated, and then migrated to PBKDF2, before a
-	// FIPS 140-3 process can open it (#84; see MigrateToFIPS).
+	// FIPS 140-3 process can open it (see MigrateToFIPS).
 	Time   *int `json:"time,omitempty"`
 	Memory *int `json:"memory,omitempty"`
 	CPUs   *int `json:"cpus,omitempty"`
@@ -475,8 +450,8 @@ type Config struct {
 	// Requirements is the LUKS2 requirements object, nil when the container
 	// declares none.
 	//
-	// It is a POINTER TO A STRUCT and not a []string, which is what it was
-	// until #152. LUKS2 spells this member as an OBJECT carrying a mandatory
+	// It is a pointer to a struct and not a []string: LUKS2 spells this member
+	// as an object carrying a mandatory
 	// array -- both `mandatory` and `online-reencrypt-v3` are literals in
 	// libcryptsetup -- so the flat slice did not merely lose detail: the decode
 	// failed outright with "cannot unmarshal object into Go struct field
@@ -502,8 +477,7 @@ type Config struct {
 // see it. It stops every WRITE: encodeMetadataForHeader refuses with an
 // UnsupportedRequirementError before anything touches the device, and that is
 // the one chokepoint every mutation in this package passes through. Corruption
-// happens on write, so that is where the refusal belongs (owner ruling,
-// 2026-09-13).
+// happens on write, so that is where the refusal belongs.
 type Requirements struct {
 	// Mandatory names requirements an implementation MUST understand to modify
 	// the container. LUKS2 defines no optional counterpart today; an
@@ -535,15 +509,7 @@ func (e *UnsupportedRequirementError) Error() string {
 
 func (e *UnsupportedRequirementError) Unwrap() error { return ErrUnsupportedRequirement }
 
-// implementedRequirements is every LUKS2 mandatory requirement this package
-// can honor on a WRITE.
-//
-// It is EMPTY, and that is the honest state rather than an oversight: this
-// package implements none of the features LUKS2 currently gates this way --
-// online reencryption above all -- so every mandatory requirement it meets is
-// one it must refuse to write over. The set exists as a named, searchable place
-// to add a requirement the moment support for it lands, so the guard and the
-// feature cannot drift apart.
+// implementedRequirements is every LUKS2 mandatory requirement this package can honor on a write; currently none.
 var implementedRequirements = map[string]bool{}
 
 // CheckRequirementsImplemented refuses a container whose mandatory

@@ -15,11 +15,8 @@
 // tracked file is published byte-for-byte, as it stands at the tag. Nothing
 // rewrites a file on the way out, so a lab value has to be scrubbed in the
 // source before tagging. Publishing that tree and tagging it on the public
-// side are separate steps, each taken by the owner. The model is go-quicbaas's gate of the same name,
-// written after go-quicbaas#944 found a symlink into the lab's NFS mount, the
-// private forge in a release workflow and in documentation links, the private
-// registry in captured CI logs, and lab hosts in `--help` text and godoc. None
-// of it was load-bearing and nothing prevented any of it. This is what
+// side are separate steps, each taken by a person. It mirrors go-quicbaas's
+// gate of the same name. This is what
 // prevents it here.
 //
 // WHAT IS REPORTED, and why each class is a leak rather than a style problem:
@@ -78,9 +75,9 @@
 //   - Workflows other than ci.yml, nightly.yml, release.yml and
 //     signatures.yml (PublishedWorkflows), including `.yaml` variants and subdirectories.
 //
-// FILES TRACKED ON main AND STRIPPED AT PUBLISH (#211), listed by
+// Files tracked on main and stripped at publish, listed by
 // DefaultStripAtPublish: the agent files CLAUDE.md, AGENTS.md and `.claude/` at
-// any depth (standards project-scaffold.md §7, #252; only the local tool state
+// any depth (standards project-scaffold.md §7; only the local tool state
 // `.claude/settings.local.json` is gitignored), the code-analysis tool
 // configuration `.serena/` at any depth, the internal review workflow
 // .github/workflows/code-review.yml (that exact name; a `.yaml` variant or
@@ -104,11 +101,7 @@
 // are the RFC 5737 / RFC 2606 / role names above and, for owner-path, a
 // repository-relative path or /var/lib, /srv, /var/tmp.
 //
-// THE FIRST-RELEASE SCRUB. When the gate was added the tree already held no lab
-// address, hostname or owner path. The scrub replaced .github/require-tool.sh
-// and test/integration/docker-run.sh with the Go commands above (same
-// behavior) and removed CLAUDE.md from the index; #252 tracks it again,
-// stripped at publish.
+// The Go commands above replace shell scripts with the same behavior.
 //
 // Where the patterns live: fleet.go, returned by Fleet. A pattern is a shape
 // and a set of digests: the shape is a generic regexp that names no fleet
@@ -209,13 +202,7 @@ func Fleet() []Pattern { return fleet }
 // classes is every class a pattern or an allow rule may name.
 var classes = []Class{ClassLabAddress, ClassLabHost, ClassOwnerPath, ClassOwnerAccount}
 
-// mayContainLabValue reports whether any pattern of set matches anywhere in
-// content. Almost no file in this tree contains a lab value, and the whole
-// tracked tree is read on every unit-test pass: settling "there is nothing
-// here" has to be cheap, so each distinct shape runs once over the whole
-// content, against the digests of every pattern that shares it, and the
-// line-by-line scan runs only on a file that has a hit. No shape matches
-// across a newline, so a hit in a line is a hit in the content.
+// mayContainLabValue reports whether any pattern of set matches anywhere in content, running each distinct shape once.
 func mayContainLabValue(set []Pattern, content []byte) bool {
 	text := string(content)
 	byShape := map[*regexp.Regexp][]string{}

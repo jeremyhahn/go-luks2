@@ -26,12 +26,7 @@ const stdinKeyFile = "-"
 
 const keyFileHelp = "  --key-file <path|->  Read the passphrase from a file, or standard input (-)\n"
 
-// terminal is the boundary to the real terminal, kept behind an interface
-// so a test never needs one. ReadPassword's return is the one place this
-// package reads a credential into a plain []byte: golang.org/x/term offers
-// no other shape, so the caller moves it into an enclave immediately
-// and the terminal buffer is wiped: that wipe happens inside Custody.Adopt,
-// which takes ownership of exactly this slice.
+// terminal is the real-terminal boundary; ReadPassword's buffer is adopted into an enclave and wiped by Custody.Adopt.
 type terminal interface {
 	ReadPassword(fd int) ([]byte, error)
 	IsTerminal(fd int) bool
@@ -48,10 +43,7 @@ type keySource struct {
 	// standard input, or "" when the flag was not given.
 	path string
 
-	// given reports whether the flag appeared on the command line, so an
-	// EMPTY path (--key-file "") is refused rather than read as "no key
-	// file", which would quietly fall back to a prompt or to standard
-	// input.
+	// given reports whether the flag appeared, so --key-file "" is refused.
 	given func() bool
 }
 
@@ -64,10 +56,7 @@ func keyFileFlag(f *flags, name string) *keySource {
 	return src
 }
 
-// readPassphrase obtains a credential from, in order: an explicit --key-file
-// path or standard input, a pipe (standard input is not a terminal), or an
-// interactive prompt. The result is owned by the caller and must be
-// released through e.custody.
+// readPassphrase reads a credential from --key-file or stdin, a pipe, or a prompt; the caller releases it through e.custody.
 func readPassphrase(e *env, prompt string, confirm bool, src keySource) (enclave.ByteAccess, error) {
 	switch {
 	case src.path == "" && src.given != nil && src.given():
@@ -159,11 +148,7 @@ func enclavesEqual(a, b enclave.ByteAccess) (bool, error) {
 	return equal, err
 }
 
-// readKeyFile reads r to EOF -- the whole file is the credential, trailing
-// newline included, cryptsetup's own rule for --key-file -- directly into
-// locked memory, and refuses anything over limit. limit is a parameter
-// (production always passes maxKeyFileSize) so a test can exercise the
-// too-large path without allocating anywhere near 8 MiB of locked memory.
+// readKeyFile reads r to EOF into locked memory, trailing newline included, refusing anything over limit.
 func readKeyFile(custody secret.Custody, r io.Reader, source string, limit int) (enclave.ByteAccess, error) {
 	buf := newEnclaveBuffer(custody, "read key file", 64)
 	one := make([]byte, 1)
@@ -196,10 +181,7 @@ func readKeyFile(custody secret.Custody, r io.Reader, source string, limit int) 
 	return result, nil
 }
 
-// readKeyLine reads one line from r -- up to, but not including, the first
-// newline -- directly into locked memory. It is the default credential
-// source when standard input is not a terminal and no --key-file was given.
-// limit is a parameter for the same reason readKeyFile's is.
+// readKeyLine reads one line from r into locked memory, refusing anything over limit.
 func readKeyLine(custody secret.Custody, r io.Reader, limit int) (enclave.ByteAccess, error) {
 	buf := newEnclaveBuffer(custody, "read passphrase", 64)
 	one := make([]byte, 1)

@@ -39,9 +39,7 @@ func writeScript(t *testing.T, path, body string) {
 	}
 }
 
-// childPIDFIFO makes a FIFO the script under test writes its backgrounded
-// child's PID into. Opening a FIFO blocks until the other end opens it, so
-// the read in readChildPID is the handshake itself: no polling for a file.
+// childPIDFIFO makes a FIFO the script writes its background child's PID into; opening it is the handshake.
 func childPIDFIFO(t *testing.T, dir string) string {
 	t.Helper()
 	path := filepath.Join(dir, "child.pid")
@@ -257,13 +255,7 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 		t.Fatal("Run did not return within the wait-delay budget after cancellation")
 	}
 
-	// Not a liveness check by kill(pid, 0): a terminated child is reparented
-	// to PID 1, and a container's PID 1 is not guaranteed to reap it, so it
-	// can sit as a zombie -- still "alive" by that signal -- indefinitely.
-	// /proc's State is read instead: gone, or zombie, both mean the signal
-	// that killed the group reached this grandchild too; only a process
-	// still actually running (R/S/D) means it did not. The SIGKILL may not have
-	// been delivered yet when Run returns, so poll for a moment.
+	// Read /proc State, not kill(pid, 0): a zombie counts as dead; poll briefly for the SIGKILL to land.
 	for end := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
 		if err != nil || strings.Contains(string(state), "State:\tZ ") {
@@ -275,9 +267,7 @@ func TestRunKillsTheWholeProcessGroupOnCancel(t *testing.T) {
 	}
 }
 
-// TestRunKillsTheWholeGroupWhenTermIsIgnored is S8: a program and a helper
-// that both ignore SIGTERM outlast the grace, and the kill that follows it
-// takes the process group (-pgid), not only the leader.
+// TestRunKillsTheWholeGroupWhenTermIsIgnored is S8: after the grace, the kill takes the whole process group.
 func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
 	bin := trustedDir(t)
 	pidFile := childPIDFIFO(t, bin)
@@ -303,8 +293,7 @@ func TestRunKillsTheWholeGroupWhenTermIsIgnored(t *testing.T) {
 		t.Fatal("Run did not return after the grace expired")
 	}
 
-	// The SIGKILL of the group is sent as the grace expires; give the kernel a
-	// moment to deliver it. A zombie or an absent entry is a dead process.
+	// Give the kernel a moment to deliver the group SIGKILL; a zombie or absent entry is dead.
 	for end := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		state, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid)) // #nosec G304 -- /proc/<pid> of a PID this test itself started
 		if err != nil || strings.Contains(string(state), "State:\tZ ") {

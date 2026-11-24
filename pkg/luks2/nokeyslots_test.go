@@ -14,32 +14,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Issue #30: a volume with no keyslot the unlock path can try used to be
-// reported as a wrong passphrase.
-//
-// The scan fell through its loop without executing the body, and the function
-// ended at a bare credential verdict. So an operator whose container carries no
-// openable keyslot was told their passphrase was wrong. They retype it, reach
-// for their backup passphrase, and conclude they have lost the credential --
-// when no passphrase would ever have worked and the credential was never the
-// problem.
-//
-// ErrNoKeyslots was declared for exactly this state and returned by nothing.
-// The sentinel was not vestigial; the path that should have raised it raised
-// something misleading instead.
-//
-// The state is reachable without anything exotic. A `reencrypt`-only container
-// is the sharpest case, because it looks POPULATED: ListKeyslots reports the
-// slot -- deliberately, it keeps a broader view than the unlock path -- while
-// nothing can open it.
+// A volume with no keyslot the unlock path can try reports ErrNoKeyslots, not a credential failure.
 
-// noUsableKeyslotVolume writes a container in one of the two reachable
-// no-usable-keyslot states and returns its path.
-//
-// reencryptOnly=false empties the keyslots object outright; true replaces the
-// keyslot with a `reencrypt` one, which is spec-legal, survives the header
-// read's validation, and is the state a container interrupted mid-reencryption
-// is actually in.
+// noUsableKeyslotVolume writes a container with an empty keyslots object, or with only a reencrypt keyslot, and returns its path.
 func noUsableKeyslotVolume(t *testing.T, name string, reencryptOnly bool) string {
 	t.Helper()
 
@@ -96,8 +73,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 				t.Fatalf("ReadHeader failed: %v", err)
 			}
 
-			// Non-vacuity for the reencrypt case: the container must still LOOK
-			// populated, or this is just the empty-map case under another name.
+			// The reencrypt case must still look populated.
 			if tc.reencryptOnly {
 				slots, err := listKeyslotsForTest(path)
 				if err != nil {
@@ -121,10 +97,6 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 			if errors.Is(err, ErrWrongKey) {
 				t.Fatalf("no keyslot was tried, yet the failure claims verification was attempted: %v", err)
 			}
-			// The assertion that used to sit here -- that the failure is not
-			// ErrInvalidPassphrase -- is GONE with the sentinel (#70). The
-			// property it guarded is now structural: the package cannot report a
-			// passphrase verdict because no such value exists to report.
 
 			// The exported paths that reach the same scan must carry the
 			// sentinel through rather than flatten it.
@@ -137,10 +109,7 @@ func TestAVolumeWithNoUsableKeyslotIsNotReportedAsAWrongPassphrase(t *testing.T)
 		})
 	}
 
-	// THE CONTROL, and it is the one that matters most: the fix must not be
-	// "never return a verification verdict again". A healthy container met with
-	// a genuinely wrong passphrase must still say verification failed, and must
-	// NOT say the container has no keyslots.
+	// Control: a healthy container with a wrong passphrase still reports verification failure, not ErrNoKeyslots.
 	t.Run("a healthy volume still reports verification failure for a wrong passphrase", func(t *testing.T) {
 		path := newImage(t, "healthy.img")
 		formatWithLibrary(t, path)

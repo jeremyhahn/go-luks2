@@ -94,12 +94,7 @@ func (d Deriver) DeriveFromSecret(ctx context.Context, material enclave.ByteAcce
 // derived bytes, before any enclave custody. Most callers want Derive;
 // DerivePlain exists for the callers that compare or test the bytes directly.
 func (d Deriver) DerivePlain(ctx context.Context, passphrase []byte, p Params, keySize int) ([]byte, error) {
-	// A PANIC GUARD, not a policy ceiling: crypto/pbkdf2 refuses a
-	// non-positive keyLength with an error x/crypto used to turn into a
-	// panic, and argon2 dereferences nil on one. The ceiling a header must
-	// respect is applied where headers are read, not here: this function
-	// also serves Format/AddKey/ChangeKey, deriving from a size the CALLER
-	// chose.
+	// A panic guard for a non-positive key length, not a policy ceiling.
 	if keySize <= 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "requested key length must be positive"}
 	}
@@ -155,11 +150,7 @@ func derivePBKDF2(passphrase, salt []byte, p Params, keySize int, mode fips.Mode
 		return nil, err
 	}
 
-	// string(passphrase) is the unwipeable copy exposure 2 in internal/secret
-	// records. It is made HERE now rather than inside the x/crypto wrapper,
-	// which changes who makes it and not whether it is made: crypto/pbkdf2
-	// takes a string, and the module copies it again into the HMAC state
-	// regardless. The ruling above is what settles that.
+	// string(passphrase) is the unwipeable copy recorded as exposure 2 in internal/secret.
 	key, err := pbkdf2.Key(hashFunc, string(passphrase), salt, *p.Iterations, keySize)
 	if err != nil {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto pbkdf2", Err: err}
@@ -195,17 +186,12 @@ func deriveArgon2(
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto " + op + ": cpus must be between 1 and 255"}
 	}
 
-	// The round count, which x/crypto/argon2 PANICS on rather than refusing:
-	// "argon2: number of rounds too small" for time < 1.
+	// x/crypto/argon2 panics for time < 1.
 	if *p.Time < 1 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "crypto " + op + ": time cost must be at least 1"}
 	}
 
-	// AND THE MEMORY COST: these are signed ints out of JSON converted with
-	// uint32 below, so -1 becomes 4294967295 KiB and argon2 is asked for a
-	// FOUR TERABYTE matrix. Not an error -- an allocation. Only the floor is
-	// enforced here; the ceiling is the read path's job (ValidateCost), so a
-	// foreign volume that currently unlocks is not newly refused.
+	// Refuse a memory cost below the floor; a negative value would wrap to a huge allocation.
 	if *p.Memory < MinArgon2Memory {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: fmt.Sprintf("crypto %s: memory cost %d is below the %d KiB floor; "+
 			"a negative value becomes ~4 TiB after the uint32 conversion", op, *p.Memory, MinArgon2Memory)}

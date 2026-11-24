@@ -21,16 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/dmcrypt"
 )
 
-// What the KERNEL does, asserted against a kernel. See
-// keyring_integration_test.go (now moved, from pkg/luks2) for the full
-// reasoning: this fills the gap the fake keyring in the unit tier cannot
-// close on its own claim.
-//
-// This package reaches internal/keyring's exported API directly
-// (keyring.Live, keyring.AddVolumeKey, keyring.Description,
-// keyring.PinOSThread, keyring.KeyType, keyring.DescriptionPrefix) rather
-// than through pkg/luks2's own unexported wrappers, since internal/keyring
-// is importable module-wide.
+// Kernel keyring behavior asserted against a real kernel through internal/keyring's exported API.
 
 // integrationKeyLen is the length of the volume key each test places in the
 // kernel keyring; the bytes are drawn fresh by randomKey.

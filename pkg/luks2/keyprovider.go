@@ -20,7 +20,7 @@ import (
 // human at a terminal.
 //
 // Implementations that exec a helper binary -- the command and systemd-fido2
-// providers -- live in pkg/keyprovider (#271), which depends on this package
+// providers -- live in pkg/keyprovider, which depends on this package
 // for the KeyProvider interface rather than the other way around. What stays
 // here is the interface itself and the operations that consume one --
 // (*Volume).Enroll (provider.go) and (*Volume).UnlockWithProvider -- because
@@ -50,19 +50,10 @@ type KeyProvider interface {
 	Token() Token
 }
 
-// recoveryTokenType is the LUKS2 token type for this package's own recovery
-// keys. fido2TokenType, its FIDO2 counterpart, moved to
-// pkg/keyprovider.TokenTypeFIDO2 with the rest of the exec-helper code (#271).
+// recoveryTokenType is the LUKS2 token type for this package's recovery keys.
 const recoveryTokenType = "systemd-recovery"
 
-// importTokenLocked writes token into slot tokenID for a caller that holds the
-// device lock -- (*Volume).SetToken would wait on that same lock for ever,
-// since flock on a second descriptor waits on the first. The slot must still
-// be free: it was chosen under this lock, so anything else there is a defect,
-// and overwriting it would destroy another credential's record.
-//
-// It refuses what (*Volume).SetToken refuses: an id out of range, and a
-// token with no type.
+// importTokenLocked writes token into the free slot tokenID for a caller holding the device lock; it refuses what (*Volume).SetToken refuses.
 func importTokenLocked(ctx context.Context, dev *keyslotDevice, tokenID int, token *LegacyToken) error {
 	if tokenID < 0 || tokenID >= MaxTokens {
 		return &errs.Error{Kind: ErrInvalidHeader, Detail: "token id " + strconv.Itoa(tokenID) + " is out of range"}
@@ -126,7 +117,7 @@ func killKeyslotLocked(ctx context.Context, dev *keyslotDevice, keyslot int) err
 // holding a volume that needs attention, so it is the last one that should
 // go untested.
 
-// The old free-function UnlockWithProvider is gone (#268): it activated a
+// The old free-function UnlockWithProvider is gone: it activated a
 // volume, which is now pkg/dmcrypt's job, and pkg/luks2 no longer has a
 // route to device-mapper or the kernel keyring. Its replacement is
 // (*Volume).UnlockWithProvider (provider.go) plus pkg/dmcrypt.Activate.

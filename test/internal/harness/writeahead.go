@@ -20,7 +20,7 @@ const dmUUIDMaxLength = 128
 // length. It is cryptsetup's format, and dmcrypt.Activate follows it, so one
 // derivation covers a mapping either of them creates.
 //
-// It exists so a mapping can be recorded BEFORE it exists (#348). Recording
+// It exists so a mapping can be recorded BEFORE it exists. Recording
 // what an activation returned leaves a window in which the mapping is on the
 // host and in no ledger; when the activation runs in another process -- a
 // FIPS child, cryptsetup -- that window lasts until the parent sees the child
@@ -79,7 +79,7 @@ func CheckRecordedMapping(rm Remover, name, recorded string) error {
 }
 
 // ActivateRecordedAhead runs activate, which maps device as name, with the
-// mapping recorded in l before activate starts (#348), then checks the live
+// mapping recorded in l before activate starts, then checks the live
 // mapping against that record. Recording what activate created once it has
 // returned is too late: a run killed in between leaves a mapping no ledger
 // attributes, and the next run's reaper refuses the host.

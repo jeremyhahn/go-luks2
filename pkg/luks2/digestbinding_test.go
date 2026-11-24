@@ -19,31 +19,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// A LUKS2 digest states WHICH keyslots it authenticates, and honoring that is
-// what makes verification verify anything.
-//
-// A container can hold more than one volume key at a time -- that is the
-// ordinary state of one being reencrypted -- and each digest attests exactly
-// one of them, naming the keyslots that unwrap it. A scan that tried every
-// digest against a key recovered from ONE keyslot accepted that key on the
-// strength of an attestation made about a DIFFERENT keyslot: the unlock would
-// then hand the caller a key it believed was authenticated for this keyslot's
-// segments, and KillSlot would authorize a destructive change through an
-// association the header never made.
-//
-// The header is attacker-controlled input in this package, and the "keyslots"
-// array is part of it. Filtering on it does not make the digest trustworthy; it
-// makes the code stop claiming an authentication the header does not assert.
+// A digest authenticates only the keyslots it names; verification honors that association.
 
-// twoVolumeKeyContainer writes a container holding TWO unrelated master keys:
-// keyslot 0 wraps keyA under passphrase A and is attested by digest 0, keyslot
-// 1 wraps keyB under passphrase B and is attested by digest 1. Neither digest
-// names the other's keyslot.
-//
-// This is the shape the strict association exists for and it cannot be
-// simulated with one master key: with a single key, every digest in the header
-// attests the same bytes, so a scan that ignored the association would reach
-// the same verdict as one that honored it and the fixture would prove nothing.
+// twoVolumeKeyContainer writes a container with two unrelated master keys, each keyslot attested only by its own digest.
 func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) string {
 	t.Helper()
 
@@ -84,8 +62,7 @@ func twoVolumeKeyContainer(t *testing.T, name string, passA, passB []byte) strin
 
 	writeKeyslot(t, path, hdr, metadata, "1", reference, keyB, passB)
 
-	// Digest 1 attests keyB and names keyslot 1 ALONE. Digest 0, written by
-	// Format, attests keyA and names keyslot 0 alone.
+	// Digest 1 attests keyB and names keyslot 1 alone; digest 0 attests keyA and names keyslot 0 alone.
 	digestKDF, digestValue, err := createDigest(keyB, "sha256", testVolumeSys())
 	if err != nil {
 		t.Fatalf("createDigest for the second volume key failed: %v", err)
@@ -183,14 +160,7 @@ func writeKeyslot(t *testing.T, path string, hdr *header.BinaryHeader, metadata 
 	}
 }
 
-// TestADigestCannotAuthenticateAKeyslotItDoesNotName is the regression test for
-// the cross-slot verification.
-//
-// The discriminating mutation is one field: digest 0 keeps the value that
-// matches keyslot 0's master key and is RELABELLED to name keyslot 1 instead.
-// Nothing about the key material changes, so a scan that tries every digest
-// still finds a match and reports keyslot 0 as authenticated -- on the strength
-// of a digest the header says belongs to another slot.
+// TestADigestCannotAuthenticateAKeyslotItDoesNotName relabels digest 0 to name keyslot 1 and expects keyslot 0 unauthenticated.
 func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 	defer parallel(t)()
 
@@ -223,8 +193,7 @@ func TestADigestCannotAuthenticateAKeyslotItDoesNotName(t *testing.T) {
 			t.Fatalf("ReadHeader failed: %v", err)
 		}
 
-		// Digest 0 still holds the digest OF KEYSLOT 0's master key. Only the
-		// association moves.
+		// Digest 0 still holds keyslot 0's master key digest; only the association moves.
 		metadata.Digests["0"].Keyslots = []string{"1"}
 		if err := writeHeaderUnvalidated(path, hdr, metadata); err != nil {
 			t.Fatalf("failed to write the mutated header: %v", err)

@@ -14,23 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// wipeHeaders destroys every LUKS2 header copy and the keyslots area: what a
-// header-only wipe claims, a crypto-erase.
-//
-// Zeroing the two header copies alone was not one. Each copy's JSON carries the
-// keyslot salts and digests, the keyslot areas carry the wrapped volume key,
-// and a STRAY copy left over from an earlier format with a different metadata
-// size had only its 4 KiB binary header zeroed -- its JSON, salts included,
-// survived. Rebuilding a binary header in front of surviving JSON is a
-// checksum computation, and the original passphrase then opened the volume
-// from the keyslot material that had never been touched. So this zeroes:
-//
-//   - the front of the device up to the end of the keyslots area the
-//     validated header declares (both copies and every keyslot);
-//   - every keyslot area the header declares, wherever it lies below the data;
-//   - every other recognizable header copy, binary header AND JSON.
-//
-// Nothing at or past the first data segment is touched (see wipeHeaderPlan).
+// wipeHeaders zeroes every LUKS2 header copy (binary header and JSON) and the keyslots area, never touching the data segment (see wipeHeaderPlan).
 func wipeHeaders(ctx context.Context, f *os.File) error {
 	for _, r := range wipeHeaderPlan(f) {
 		if err := zeroRange(ctx, f, r.offset, r.size); err != nil {
@@ -64,24 +48,7 @@ type wipeRegion struct {
 	offset, size int64
 }
 
-// wipeHeaderPlan decides what a header-only wipe zeroes, trusting geometry
-// only from a CHECKSUM-VALIDATED copy.
-//
-// Neither direction of error is safe (#47 review):
-//
-//   - Believing a damaged copy that UNDERSTATES the geometry leaves a valid
-//     copy, or keyslot material, further out intact.
-//   - Believing a damaged copy that OVERSTATES it zeroes payload: cryptsetup's
-//     --offset can put the data segment as low as the end of the keyslots
-//     area.
-//
-// So the header area, the keyslots area, the keyslot areas and the start of
-// the data come from the validated primary, else the smallest validated
-// secondary; with none, the area is the 16 KiB default and the data start is
-// unknown. Every OTHER recognizable copy is zeroed too, clipped to the data
-// start when it is known: a valid one over its whole area, a damaged one over
-// its binary header and its JSON (headerCopyExtent), because its declared area
-// is exactly the number that cannot be believed.
+// wipeHeaderPlan decides what a header-only wipe zeroes, taking geometry only from a checksum-validated copy; damaged copies are zeroed over their binary header and JSON.
 func wipeHeaderPlan(f *os.File) []wipeRegion {
 	var (
 		chosenOffset int64 = -1
@@ -199,11 +166,7 @@ func declaredKeyslotAreas(metadata *header.Metadata) []wipeRegion {
 	return areas
 }
 
-// wipeProbeHeaderCopy reports whether what is at offset is recognizably a
-// LUKS2 header copy belonging there (ok) -- magic, version, a legal area size,
-// hdr_offset equal to offset and, for a secondary copy, an area equal to its
-// offset -- and whether its checksum also validates (valid). size is the area
-// it declares.
+// wipeProbeHeaderCopy reports whether a LUKS2 header copy belongs at offset (ok), whether its checksum validates (valid), and its declared area size.
 func wipeProbeHeaderCopy(f *os.File, offset int64) (size int64, valid, ok bool) {
 	raw := make([]byte, header.HeaderSize)
 	if _, err := f.ReadAt(raw, offset); err != nil {
@@ -230,10 +193,6 @@ func wipeProbeHeaderCopy(f *os.File, offset int64) (size int64, valid, ok bool) 
 	return int64(area), valid, true
 }
 
-// wipePass performs one wipe pass over the device
-// -tags=integration, so `unused` fires on a function the default build exercises.
-//
-// WipeKeyslot wipes a specific keyslot
 // keyslotWipeChunk is how much of a keyslot area is zeroed per write.
 //
 //nolint:unused // Test-only helper: the tests that call it are excluded under

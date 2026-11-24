@@ -511,12 +511,7 @@ func TestReadJSONMetadata(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			// A COMPLETE luks2 keyslot. The fixture used to carry only type
-			// and key_size, which is not a keyslot any LUKS2 implementation
-			// writes: it has nowhere to live on the device and no KDF to
-			// unwrap it. Completing it makes the case test what it is named
-			// for against a realistic keyslot; the incomplete form is kept
-			// below, because parsing it is the documented behavior.
+			// A complete luks2 keyslot; the incomplete form is tested below.
 			name: "with keyslots",
 			hdr: &header.BinaryHeader{
 				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
@@ -530,10 +525,7 @@ func TestReadJSONMetadata(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			// An incomplete keyslot still PARSES. It is refused where it is
-			// used, not here: refusing the header would make a container with
-			// one damaged keyslot unreadable through its intact ones. See
-			// internal/header/keyslot.go.
+			// An incomplete keyslot still parses; it is refused where it is used (internal/header/keyslot.go).
 			name: "keyslot missing its kdf, af and area still parses",
 			hdr: &header.BinaryHeader{
 				HeaderSize:   uint64(header.HeaderSize + header.DefaultSize),
@@ -656,7 +648,7 @@ func TestReadJSONMetadataRoundTrip(t *testing.T) {
 				},
 			},
 		},
-		Tokens: map[string]*LegacyToken{}, // mandatory: cryptsetup refuses a header without it (#248)
+		Tokens: map[string]*LegacyToken{}, // mandatory: cryptsetup refuses a header without it
 		Segments: map[string]*header.Segment{
 			"0": {
 				Type:       "crypt",
@@ -793,31 +785,8 @@ func TestCalculateHeaderChecksumEdgeCases(t *testing.T) {
 	}
 }
 
-// TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField is the
-// regression test for #62's actual deliverable: this function's own length
-// check is now REACHABLE and load-bearing.
-//
-// Before the size bound was hoisted into readHeaderCopy, this function derived
-// the size itself five lines above the checksum-field write, so a guard on the
-// buffer length could not fire -- instrumented with panic("GUARD REACHED") it
-// was reached zero times across the whole suite, and a test that believed it was
-// exercising the guard was in fact being satisfied by header.HeaderAreaSize's rejection
-// wrapping the same sentinel.
-//
-// With the size arriving as a parameter, a short one reaches this function, and
-// the assertion is that it comes back as an ERROR rather than as a panic: the
-// checksum-field indices are fixed by the on-disk layout, so without the guard
-// the slice expression runs off the end of the buffer and the process dies.
-//
-// The error is attributed to errChecksumBufferTooShort SPECIFICALLY, not to
-// ErrInvalidHeader, because that is the whole lesson of #62 -- errors.Is on a
-// shared sentinel answers "was it this class", never "was it this check".
-// TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON is the same property
-// for the other function the bound was hoisted out of.
-//
-// jsonSize is headerSize - header.HeaderSize. A size at or below header.HeaderSize
-// makes that zero or negative, and make() panics on a negative length, so this
-// check is what turns a caller's mistake into an error the caller can see.
+// TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField: a short buffer returns errChecksumBufferTooShort, not a panic.
+// TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON: a size at or below header.HeaderSize is an error, not a make() panic.
 func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 	reader := &mockReaderAt{data: make([]byte, header.HeaderSize*2)}
 	hdr := &header.BinaryHeader{Version: header.Version}
@@ -854,18 +823,7 @@ func TestReadJSONMetadataRefusesAHeaderSizeWithNoRoomForJSON(t *testing.T) {
 	})
 }
 
-// TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt pins WHERE the
-// bound now lives, which is the part of #62 a size-rejection test cannot see.
-//
-// A header carrying BOTH an out-of-range HeaderSize and an illegal HeaderOffset
-// has two things wrong with it, and which one is reported says which check ran
-// first. Before the hoist the offset check ran first and the size was not
-// examined until header.ValidateHeaderChecksum re-derived it; after the hoist the size
-// is bounded immediately after the magic and version, before anything else
-// consults the header at all.
-//
-// The assertion is on the size, so moving the bound back down turns this test
-// red rather than leaving it satisfied by the other guard.
+// TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt: with a bad size and a bad offset, the size is reported.
 func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
 	defer parallel(t)()
 
@@ -889,12 +847,7 @@ func TestReadHeaderBoundsTheDeclaredSizeBeforeAnythingElseUsesIt(t *testing.T) {
 	}
 }
 
-// nullEntryVolume writes a container carrying null keyslot AND null token
-// entries alongside healthy ones, through the exported write path.
-//
-// Both kinds in one fixture on purpose: the report has to say WHICH id space
-// each lost entry came from, and a fixture with only one kind cannot tell a
-// correct report from one that labels everything "keyslot".
+// nullEntryVolume writes a container with null keyslot and null token entries beside healthy ones.
 func nullEntryVolume(t *testing.T, name string) string {
 	t.Helper()
 
@@ -927,16 +880,7 @@ func nullEntryVolume(t *testing.T, name string) string {
 	return path
 }
 
-// TestReadHeaderReportsTheNullEntriesItDropped is the fix for #27.
-//
-// ReadHeader removes null keyslot and token entries, which is what makes the
-// nil unrepresentable downstream and is deliberate. What was wrong is that no
-// caller could learn it happened, so a ReadHeader -> mutate -> WriteHeader
-// cycle silently deleted them from the device.
-//
-// The assertion is on the exact report, ids and kinds and ORDER, not merely
-// that something non-empty came back: a report that names the wrong id space,
-// or that changes between runs, is the same problem in a new place.
+// TestReadHeaderReportsTheNullEntriesItDropped asserts the exact ids, kinds and order of dropped null entries.
 func TestReadHeaderReportsTheNullEntriesItDropped(t *testing.T) {
 	defer parallel(t)()
 
@@ -999,17 +943,7 @@ func TestReadHeaderReportsNothingDroppedForAnIntactHeader(t *testing.T) {
 	}
 }
 
-// TestDroppedNullEntriesNeverReachesTheDisk pins that the diagnostic field
-// cannot become a wire field.
-//
-// It asserts on the TYPE's reflected json tag set rather than on the bytes of
-// one marshaled instance. Absence asserted through the serializer is blind to
-// a field the serializer declines to emit -- an empty slice with omitempty, or
-// a nil map -- so a keySet check on emitted JSON would pass with the tag
-// removed and the field merely unset. The field set also fails on an ADDED
-// field, so no new member of this struct can reach a LUKS2 header without this
-// test acknowledging it, which matters because cryptsetup validates the JSON
-// object and rejects members it does not expect.
+// TestDroppedNullEntriesNeverReachesTheDisk checks the type's json tag set, so no field can reach a LUKS2 header unacknowledged.
 func TestDroppedNullEntriesNeverReachesTheDisk(t *testing.T) {
 	var got []string
 	typ := reflect.TypeOf(header.Metadata{})

@@ -27,15 +27,7 @@ import (
 // only ever met through a double proves nothing about the plane it stands in
 // for, and a test that needs root proves nothing on a developer's machine.
 
-// TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears is the success path, and
-// it covers the case the defect actually was: the node arrives LATE, not
-// never.
-//
-// LOOP_CTL_GET_FREE allocates a minor and returns; creating /dev/loop<N> is
-// udev's or devtmpfs's job and races this code. Asserting only that the call
-// eventually returns nil would be satisfied by a version that slept out the
-// whole budget, so this also asserts it returned near the creation rather
-// than near the deadline.
+// TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears: a late node returns near its creation, not the deadline.
 func TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears(t *testing.T) {
 	dir := t.TempDir()
 	node := filepath.Join(dir, "loop8")
@@ -62,13 +54,7 @@ func TestWaitForLoopNodeReturnsAsSoonAsTheNodeAppears(t *testing.T) {
 	}
 }
 
-// TestWaitForLoopNodeTimesOutWithATypedError is the other side: a node
-// nothing will ever create must produce a bounded, typed refusal.
-//
-// The distinction this error carries is the point. The bare ENOENT it
-// replaces read as "there is no such loop device", when the truth is that
-// the minor IS ours and only the path is missing -- which sends an operator
-// to look at loop device exhaustion instead of at udev.
+// TestWaitForLoopNodeTimesOutWithATypedError: a node that never appears yields a bounded ErrNodeAbsent.
 func TestWaitForLoopNodeTimesOutWithATypedError(t *testing.T) {
 	node := filepath.Join(t.TempDir(), "loop9999")
 
@@ -99,10 +85,7 @@ func TestWaitForLoopNodeTimesOutWithATypedError(t *testing.T) {
 // classes. Retrying a permission or I/O failure for the whole budget would
 // report it as a missing node and send an operator to the wrong subsystem.
 func TestWaitForLoopNodeDoesNotRetryANonExistenceFailure(t *testing.T) {
-	// A path whose PARENT is a regular file: stat fails with ENOTDIR, which
-	// is not os.IsNotExist and is uid-independent, so this holds for root
-	// too -- the project's rule against building failure cases out of
-	// permission bits.
+	// A path under a regular file fails stat with ENOTDIR, for root too.
 	dir := t.TempDir()
 	notADir := filepath.Join(dir, "file")
 	if err := os.WriteFile(notADir, nil, 0600); err != nil {
@@ -143,16 +126,7 @@ func TestWaitForLoopNodeAcceptsAnExistingNodeImmediately(t *testing.T) {
 	}
 }
 
-// TestWaitForLoopNodeStopsOnceContextIsCancelled is the cancellation
-// requirement: a wait is a select on ctx.Done() and a clock
-// timer, so a caller that gives up is not held past its own cancellation.
-//
-// The context is canceled from the fake clock's OnWait hook, which runs
-// after a poll has already fired -- so the NEXT iteration's ctx check, not
-// the select, is what the test can assert on deterministically: a fired
-// timer and an already-canceled context are both ready at once, and
-// select's choice between two ready cases is not something a test should
-// depend on.
+// TestWaitForLoopNodeStopsOnceContextIsCancelled: ctx is canceled from OnWait, so the next iteration's check returns.
 func TestWaitForLoopNodeStopsOnceContextIsCancelled(t *testing.T) {
 	node := filepath.Join(t.TempDir(), "loop0")
 
@@ -234,12 +208,7 @@ func backingImage(t *testing.T) string {
 	return path
 }
 
-// TestAttachRetriesALoopDeviceTakenByAnotherCaller covers the race
-// LOOP_CTL_GET_FREE leaves open: it names a free device without reserving
-// it, so a concurrent caller can bind it first and LOOP_SET_FD fails with
-// EBUSY. Attach must ask for another device rather than fail. A real attach
-// meets this only when two attaches collide, so the integration suite
-// covers it on some runs and not others; this test covers it on every one.
+// TestAttachRetriesALoopDeviceTakenByAnotherCaller: EBUSY from LOOP_SET_FD makes Attach ask for another device.
 func TestAttachRetriesALoopDeviceTakenByAnotherCaller(t *testing.T) {
 	s, calls := attachSys(t, unix.EBUSY)
 	file := backingImage(t)

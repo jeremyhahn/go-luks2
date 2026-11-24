@@ -16,13 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Format over an old volume wrote the new primary and then the new secondary
-// over the old copies, which it never cleared. A crash between the two left
-// the old secondary -- complete, valid, and at a higher sequence id than a
-// fresh header's -- for a reader to choose over the new primary, or to find
-// by probing when the new primary was torn: a header naming keyslots the
-// format had already overwritten with random data. cryptsetup zeroes the
-// header areas before it writes either copy (LUKS2_wipe_header_areas).
+// Format must clear old header copies before writing, so a crash cannot leave an old secondary for a reader to choose.
 func TestFormatCrashAfterThePrimaryLeavesNoOldHeader(t *testing.T) {
 	defer parallel(t)()
 	errCrash := errors.New("the machine went down")

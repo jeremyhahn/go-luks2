@@ -23,20 +23,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Every go-luks2 write path against a cryptsetup write on the same volume, in
-// both orders. TestCryptsetupWaitsForTheDeviceLock and
-// TestUnlockWaitsForCryptsetupsWriteLock prove the lock for a bare
-// acquireDeviceLock and for Unlock; these prove it for each operation that
-// rewrites the header, and that the result is one header both tools read,
-// carrying both changes:
-//
-//   - cryptsetup waits for go-luks2: the operation is held just after it takes
-//     the locks, cryptsetup is seen blocked on its lock file, and only after
-//     the operation returns does cryptsetup write.
-//   - go-luks2 waits for cryptsetup: cryptsetup holds its write lock (strace
-//     delays the flock that took it) and the operation, started inside that
-//     window, writes only after cryptsetup has -- or cryptsetup's token
-//     would be missing from the header the operation wrote.
+// Every write path against a cryptsetup write, in both orders; the result is one header carrying both changes.
 
 const (
 	mutualSlotOnePassphrase = "mutual-slot-one-passphrase"
@@ -213,12 +200,7 @@ func sequenceID(t *testing.T, device string) uint64 {
 	return hdr.SequenceID
 }
 
-// TestCryptsetupWaitsForEveryWritePath: each operation is held just after it
-// has taken the locks, and a cryptsetup write started then waits on its lock
-// file until the operation is done.
-//
-// The hold is the operation's own Volume.sys.lockHeld, so no other test's
-// lock passes through it.
+// TestCryptsetupWaitsForEveryWritePath: each operation is held after taking its locks via Volume.sys.lockHeld, and cryptsetup waits.
 func TestCryptsetupWaitsForEveryWritePath(t *testing.T) {
 	requireCryptsetupDeclared(t)
 	tokenFile := filepath.Join(t.TempDir(), "token.json")

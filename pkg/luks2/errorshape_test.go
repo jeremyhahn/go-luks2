@@ -105,12 +105,7 @@ func requireKindAndOp(t *testing.T, what string, err error, kind error, op, want
 	}
 }
 
-// TestVolumeMethodErrorsAreClassified calls every Volume method that returns
-// an error on a closed volume, a read-only volume and with a canceled
-// context, and requires every refusal to be an *errs.Error with the one Kind
-// that refusal has and the Op of the method called. The device is blank, so
-// a method the condition does not stop reports what it meets next: no LUKS2
-// header, or the nil credential or provider it was handed.
+// TestVolumeMethodErrorsAreClassified checks every Volume method's refusal on a closed, read-only or canceled volume is one classified *errs.Error.
 func TestVolumeMethodErrorsAreClassified(t *testing.T) {
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()

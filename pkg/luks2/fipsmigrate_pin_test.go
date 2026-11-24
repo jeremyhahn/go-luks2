@@ -15,13 +15,7 @@ import (
 	"testing"
 )
 
-// TestMigrateToFIPSWritesOnlyTheDeviceItLocked (#255): the import resolves the
-// device path ONCE. A symlink re-pointed at another volume in the middle of
-// the import -- after the lock, the header read and the medium checks, at the
-// first key derivation -- must not receive a single byte, and the import must
-// finish on the volume it locked.
-//
-// Not parallel: it substitutes the package's derivation seam.
+// TestMigrateToFIPSWritesOnlyTheDeviceItLocked: a symlink re-pointed mid-import receives nothing. Not parallel: it substitutes the derivation seam.
 func TestMigrateToFIPSWritesOnlyTheDeviceItLocked(t *testing.T) {
 	defer parallel(t)()
 	if fips140.Enabled() {

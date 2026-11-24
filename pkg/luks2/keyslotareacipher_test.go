@@ -16,14 +16,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// #106: the read path HONORS the mode half of keyslots.<n>.area.encryption.
-//
-// Until it did, unlockKeyslot took only the algorithm ("aes-cbc-essiv:sha256"
-// -> "aes") and always ran AES-XTS, so a keyslot declaring a mode its material
-// does not have opened perfectly for this package and for no conforming
-// implementation. No writer-side test could catch a wrong declaration, because
-// the reader that would have to notice it did not look. These tests are the
-// read side that makes the declaration testable at all.
+// The read path honors the mode in keyslots.<n>.area.encryption.
 
 // TestParseKeyslotAreaEncryption pins the exact set of keyslot area specs the
 // read path decrypts, and that everything else is refused with the typed error.
@@ -120,17 +113,11 @@ func TestUnsupportedKeyslotCipherErrorMatchesBothSentinels(t *testing.T) {
 	}
 }
 
-// TestKeyslotDeclaringAModeItDoesNotUseIsRefused is the mutation test the issue
-// asks for: change ONLY the declared mode, leave the material alone, and the
-// read path must go red -- with the typed error, not a digest mismatch.
-//
-// The control matters as much as the mutation: the untouched fixture must
-// open, or a refusal proves nothing about the declaration.
+// TestKeyslotDeclaringAModeItDoesNotUseIsRefused: changing only the declared mode gives the typed error; the untouched control opens.
 func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 	defer parallel(t)()
 
-	// declare stamps a fresh library-formatted container and rewrites ONLY
-	// keyslot 0's declared area encryption. The material is untouched.
+	// declare copies a fresh container and rewrites only keyslot 0's declared area encryption.
 	declare := func(t *testing.T, spec string) string {
 		t.Helper()
 		device := newImage(t, "declared-mode.img")
@@ -204,13 +191,7 @@ func TestKeyslotDeclaringAModeItDoesNotUseIsRefused(t *testing.T) {
 	}
 }
 
-// TestConformance_CryptsetupKeyslotCiphers holds the read path against keyslots
-// CRYPTSETUP wrote with a chosen --keyslot-cipher, so the material genuinely is
-// what the header says it is.
-//
-// The two XTS spellings must open. A genuine CBC-ESSIV keyslot must be refused
-// with the typed error: before #106 it was decrypted as XTS and failed as a
-// digest mismatch, which an operator cannot tell apart from a wrong passphrase.
+// TestConformance_CryptsetupKeyslotCiphers: cryptsetup-written XTS keyslots open; a CBC-ESSIV keyslot is refused with the typed error.
 func TestConformance_CryptsetupKeyslotCiphers(t *testing.T) {
 	defer parallel(t)()
 

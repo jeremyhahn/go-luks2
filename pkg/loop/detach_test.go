@@ -21,12 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// The waiting logic is exercised here without a loop device; the
-// kernel-facing path is covered by the integration suite in test/integration/loop,
-// which drives a real detach. Both halves are needed:
-// a seam only ever met through a double proves nothing about the plane it
-// stands in for, and a test that needs root proves nothing on a developer's
-// machine.
+// The waiting logic is tested here without a loop device; test/integration/loop drives a real detach.
 
 const (
 	testDetachTimeout = 20 * time.Millisecond
@@ -74,16 +69,7 @@ func TestWaitForDetachReturnsOnceTheAssociationIsGone(t *testing.T) {
 	}
 }
 
-// TestWaitForDetachReportsADeferredReleaseAsSuccess covers the case that
-// made the first version of this wait a BREAKING change, and it is also
-// what holds the line against a change that has now been proposed twice.
-//
-// When something else still holds the device -- a mounted filesystem, a
-// dm-crypt mapping -- LOOP_CLR_FD sets the autoclear flag and returns 0. The
-// kernel has accepted the request and will complete it when the last user
-// goes away; this is what `losetup -d` does on a busy device. Waiting out
-// the full timeout and then reporting failure would tell a caller their
-// detach did not work when it did.
+// TestWaitForDetachReportsADeferredReleaseAsSuccess: a device still held at the bound is a deferred success.
 func TestWaitForDetachReportsADeferredReleaseAsSuccess(t *testing.T) {
 	deferred := loopState{backing: "/tmp/volume.img", autoclear: true}
 
@@ -97,27 +83,14 @@ func TestWaitForDetachReportsADeferredReleaseAsSuccess(t *testing.T) {
 		t.Errorf("state = %v, want Deferred", state)
 	}
 
-	// And it does NOT exit early on seeing autoclear. An earlier version
-	// did, and the consequence showed up in CI: a device held only
-	// momentarily was reported as deferred, and a caller that immediately
-	// asked whether the association was gone was told it was not. Waiting
-	// turns most of those into observed releases; only a device still held
-	// at the bound comes back deferred. On a controlled clock (go-luks2
-	// #233) the wait is exact: past the bound, by no more than one poll.
+	// Deferred does not exit early; past the bound by at most one poll.
 	if elapsed := clk.Elapsed(); elapsed <= testDetachTimeout || elapsed > testDetachTimeout+testDetachPoll {
 		t.Errorf("returned after %s; want just past the %s bound -- a momentary holder would "+
 			"be reported as deferred rather than waited out", elapsed, testDetachTimeout)
 	}
 }
 
-// TestWaitForDetachOutlastsAMomentaryHolder is the case the CI failure was,
-// and the reason deferred stopped being an early exit.
-//
-// The device is held with autoclear set for the first few polls and then
-// released -- a neighboring process letting go, a udev settle finishing, a
-// dm teardown completing. The wait must come back Released, because it saw
-// the release, rather than Deferred, which would tell a caller the device
-// might still be attached when it demonstrably is not.
+// TestWaitForDetachOutlastsAMomentaryHolder: a holder that lets go during the wait yields Released.
 func TestWaitForDetachOutlastsAMomentaryHolder(t *testing.T) {
 	calls := 0
 	backing := func(string) (loopState, error) {
@@ -277,14 +250,7 @@ func TestWaitForDetachSucceedsOnlyOnAnAuthoritativeObservation(t *testing.T) {
 	}
 }
 
-// TestDetachTimeoutCauseUsesTheDominantObservation pins the classification,
-// and it is asserted on a wait that was MOSTLY blind but read cleanly at
-// the end -- the shape that inverts a last-sample classifier.
-//
-// The two causes exist to route an operator differently: a device held by
-// something else is a process to find, an unreadable sysfs is a host to
-// fix. Blaming a holder that does not exist, because the final poll
-// happened to succeed, sends them hunting for nothing.
+// TestDetachTimeoutCauseUsesTheDominantObservation: a mostly-blind wait with a clean last read is classified as blind.
 func TestDetachTimeoutCauseUsesTheDominantObservation(t *testing.T) {
 	readFailure := errors.New("sysfs unavailable")
 
@@ -351,9 +317,7 @@ func detachSys(t *testing.T, identity func(*os.File) (uint64, uint64, error), cl
 	return s
 }
 
-// TestDetachRefusesADeviceNoLongerBackedByItsFile is the reassignment race:
-// between obtaining a Device and detaching it, the loop device was released
-// and attached to someone else's file. Detach must refuse BEFORE LOOP_CLR_FD.
+// TestDetachRefusesADeviceNoLongerBackedByItsFile: Detach refuses a reassigned device before LOOP_CLR_FD.
 func TestDetachRefusesADeviceNoLongerBackedByItsFile(t *testing.T) {
 	ours := backingIdentity{dev: 2049, ino: 12, known: true}
 	tests := []struct {

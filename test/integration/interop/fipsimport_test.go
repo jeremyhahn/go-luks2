@@ -28,21 +28,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// The FIPS import (#84) against the real kernel.
-//
-// pkg/luks2 proves the migration at the header level on file images: what
-// cryptsetup and a strict FIPS process recover from the migrated header. What
-// only this tier can prove is the DATA: that a default `cryptsetup luksFormat`
-// volume holding plaintext written through dm-crypt is, after MigrateToFIPS,
-// mapped by a process running under GODEBUG=fips140=only to the same
-// plaintext -- through device-mapper, with the key Unlock actually hands the
-// kernel -- and that cryptsetup still maps it to the same plaintext too. A
-// header that verifies but feeds dm-crypt the wrong key would pass every
-// header-level check and fail here.
-//
-// FIPS mode is fixed when a process starts, so the FIPS open runs in a
-// re-execution of this test binary with GODEBUG set for it, and reports the
-// mode it actually ran in.
+// The FIPS import against the real kernel: after MigrateToFIPS, a fips140=only child and cryptsetup both map the volume to the same plaintext.
 
 const (
 	fipsChildRoleEnv   = "GO_LUKS2_ITEST_FIPS_ROLE"
@@ -103,20 +89,13 @@ func standInActivate(_ context.Context, v *luks2.Volume, key *luks2.Key, name st
 	return &dmcrypt.Mapping{Name: name}, nil
 }
 
-// unlockInFIPSProcess unlocks and activates device as volume in a child under
-// GODEBUG=fips140=only, records any mapping the child left in this run's
-// ledger, and returns the child's exit code and output. It fails the test if
-// the child did not actually run in FIPS mode.
+// unlockInFIPSProcess unlocks and activates device as volume in a fips140=only child, records its mapping, and fails if the child was not in FIPS mode.
 func unlockInFIPSProcess(t *testing.T, device, volume string) (int, string) {
 	t.Helper()
 	return unlockInFIPSProcessObserved(t, device, volume, func() {})
 }
 
-// unlockInFIPSProcessObserved is unlockInFIPSProcess with childExited run the
-// moment the child exits, before the parent does anything more. What is on
-// disk then is all a run canceled at that moment leaves (#348), so the
-// child's mapping has to be recorded by then: the child has no suite to record
-// in, and the parent records it ahead of starting the child.
+// unlockInFIPSProcessObserved is unlockInFIPSProcess with childExited run as the child exits; the mapping is recorded before the child starts.
 func unlockInFIPSProcessObserved(t *testing.T, device, volume string, childExited func()) (int, string) {
 	t.Helper()
 	var code int
@@ -174,8 +153,7 @@ func cryptsetupWithPassphrase(t *testing.T, args ...string) {
 	}
 }
 
-// cryptsetupOpen maps device as name with cryptsetup, the mapping recorded
-// ahead of its activation like every other one in this package (#348).
+// cryptsetupOpen maps device as name with cryptsetup, recorded ahead of activation.
 func cryptsetupOpen(t *testing.T, device, name string) {
 	t.Helper()
 	activateRecordedAhead(t, device, name, func() {
@@ -285,12 +263,7 @@ func ciphertextDigest(t *testing.T, device string, offset int64) [32]byte {
 	return sum
 }
 
-// TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData: plaintext written
-// through cryptsetup's mapping of a default (Argon2id) volume is refused to a
-// FIPS process with the import named; after MigrateToFIPS -- default options,
-// on the loop device -- the ciphertext is byte-for-byte unchanged, a process
-// under GODEBUG=fips140=only maps the volume and reads the same plaintext, and
-// so does cryptsetup.
+// TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData: after MigrateToFIPS the ciphertext is unchanged and FIPS and cryptsetup read the same plaintext.
 func TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData(t *testing.T) {
 	image := filepath.Join(t.TempDir(), "fips-import.img")
 	if err := createTestFile(image, 64); err != nil {
@@ -388,17 +361,7 @@ func TestFIPSImportOfADefaultCryptsetupVolumeMapsTheSameData(t *testing.T) {
 	lockWithRetry(t, csRead)
 }
 
-// TestFIPSChildUnlocksAMigratedImageWithoutTheSuite runs the FIPS child's
-// unlock path end to end -- a real re-execution under GODEBUG=fips140=only,
-// the real Open and Unlock of a migrated cryptsetup-default volume -- with
-// only device-mapper stood in, so it needs no root and no loop device.
-//
-// The child exits from init(), before TestMain registers runSuite, so
-// anything on its path that reaches for the suite dereferences nil. That is
-// how both kernel tests above once failed with exit 2 (a panic) only AFTER
-// the migration: the un-migrated unlock is refused before activation, and
-// only a successful activation went on to record the mapping in a ledger the
-// child does not have. The parent records it instead (unlockInFIPSProcess).
+// TestFIPSChildUnlocksAMigratedImageWithoutTheSuite runs the FIPS child's unlock path with device-mapper stubbed; the child has no suite, so the parent records the mapping.
 func TestFIPSChildUnlocksAMigratedImageWithoutTheSuite(t *testing.T) {
 	image := filepath.Join(t.TempDir(), "fips-child.img")
 	if err := createTestFile(image, 32); err != nil {

@@ -101,11 +101,7 @@ func CacheIsTheStorage(path string) (bool, error) {
 	if err := unix.Statfs(path, &fsStat); err != nil {
 		return false, &errs.Error{Kind: errs.ErrIO, Detail: "failed to statfs " + path, Err: err}
 	}
-	// Statfs_t.Type is int32 on 386 and arm and int64 on amd64 and arm64, and
-	// RAMFS_MAGIC (0x858458f6) does not fit an int32: compared as the
-	// constant, it does not compile on the 32-bit targets. Every filesystem
-	// magic compared here fits in 32 bits, and an int32 field holds those
-	// same 32 bits, so the field is compared as a uint32.
+	// Statfs_t.Type is int32 on 32-bit targets, so compare as uint32.
 	return IsMemoryFilesystemMagic(uint32(fsStat.Type)), nil // #nosec G115 -- the magics compared fit 32 bits; the conversion keeps them
 }
 

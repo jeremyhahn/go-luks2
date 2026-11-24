@@ -52,9 +52,7 @@ func TestCommandTakesTheSelectedLine(t *testing.T) {
 			want:   "one",
 		},
 		{
-			// Line 0 is the whole of stdout VERBATIM. The trailing newline is
-			// kept deliberately -- see the Command doc comment and the
-			// cryptsetup --key-file measurement it refers to.
+			// Line 0 keeps stdout verbatim, trailing newline included.
 			name:   "line zero keeps the trailing newline",
 			stdout: "secret\n",
 			line:   0,
@@ -82,9 +80,7 @@ func TestCommandTakesTheSelectedLine(t *testing.T) {
 	}
 }
 
-// TestNewCommandRefusesBadInput covers what used to be validated lazily, at
-// Passphrase, and is now validated eagerly, at construction: a caller finds
-// out a path is unusable before anything execs.
+// TestNewCommandRefusesBadInput: an unusable path is refused at construction.
 func TestNewCommandRefusesBadInput(t *testing.T) {
 	tests := []struct {
 		name string
@@ -518,24 +514,7 @@ func TestCommandHonorsContext(t *testing.T) {
 	}
 }
 
-// TestCommandRefusesOverlongOutputWithoutDeadlocking pins the LIVENESS half
-// of the output bound, which the bounded-output case above cannot reach.
-//
-// That case writes maxHelperOutput+1 bytes: readFullish fills dst, peeks the
-// one extra byte and refuses -- and the helper has already exited, because
-// its whole output fit in the pipe. Nothing is left writing. A helper that
-// overruns by more than a pipe buffer is a different situation: readFullish
-// stops reading for good the moment it refuses, so the helper blocks in
-// write(2) on a pipe nobody will drain again, and cmd.Wait() blocks waiting
-// for a process that cannot exit. StdoutPipe's read end is closed by Wait,
-// i.e. only AFTER the exit that is not coming.
-//
-// With a deadline-carrying context CommandContext eventually kills the
-// helper and the deadlock unwedges. With context.Background() -- what an
-// unattended UnlockWithProvider at boot typically passes, and what this test
-// uses on purpose -- nothing ever interrupts it: Passphrase never returns,
-// holding the child and maxHelperOutput bytes of locked memory. An unlock
-// that hangs forever is strictly worse than one that fails.
+// TestCommandRefusesOverlongOutputWithoutDeadlocking: a helper overrunning the pipe buffer must not hang Passphrase under context.Background().
 func TestCommandRefusesOverlongOutputWithoutDeadlocking(t *testing.T) {
 	// Comfortably past maxHelperOutput + 1 + a full pipe buffer (64 KiB on
 	// Linux), so the helper is certainly still blocked in write(2) when
@@ -548,9 +527,7 @@ func TestCommandRefusesOverlongOutputWithoutDeadlocking(t *testing.T) {
 		t.Fatalf("failed to write helper: %v", err)
 	}
 
-	// Called directly, with no wall-clock guard (#233). A deadlock here does
-	// not return, and the test binary's -timeout ends the run with every
-	// goroutine's stack, naming this test.
+	// Called directly; a deadlock ends in the test binary's -timeout.
 	p, err := NewCommand(path, WithLine(0))
 	if err != nil {
 		t.Fatal(err)

@@ -30,21 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// cryptsetup's metadata lock, against cryptsetup itself, in every state its
-// lock directory can be in (docs/cryptsetup-interop/engineering.md, "Metadata lock").
-//
-// Each scenario runs in a CHILD of this test binary, in a mount namespace of
-// its own with a private /run: the lock directory's state is the variable
-// under test, and the real /run/cryptsetup belongs to every other test in the
-// run. The child sets the state up, then runs each step -- a cryptsetup
-// command, or a go-luks2 operation in a grandchild -- as root or as uid 1000
-// in the disk group, and reports what each did. The non-root steps run as a
-// real setuid/setgid process: root is what the permission checks under test
-// do not apply to.
-//
-// The parent asserts each step against what cryptsetup was MEASURED to do in
-// the same state (cryptsetup 2.7.5), and, where go-luks2 refuses, that the
-// header is byte-for-byte unchanged and the volume still opens in both tools.
+// cryptsetup's metadata lock against cryptsetup 2.7.5 in every lock-directory state, each scenario in a child with a private /run (docs/cryptsetup-interop/engineering.md).
 
 const (
 	lockCompatRoleEnv = "GO_LUKS2_LOCKCOMPAT_ROLE"
@@ -140,12 +126,7 @@ const lockCompatLockWait = 300 * time.Millisecond
 // scenario's passphrase.
 type lockCompatOp func(ctx context.Context, v *Volume, pass enclave.ByteAccess) error
 
-// lockCompatOps are the go-luks2 operations a step can run, each through the
-// public Volume method a caller uses, so each takes the lock that caller's
-// call takes: two reads under cryptsetup's lock held shared (Header, Unlock),
-// and three writes under it held exclusively. AddKey unlocks first, as a
-// caller must, so a state that refuses reads stops it there; KillSlot and
-// ImportToken reach the exclusive lock directly.
+// lockCompatOps are the go-luks2 operations a step can run, each through its public Volume method.
 var lockCompatOps = map[string]lockCompatOp{
 	"ReadHeader": func(ctx context.Context, v *Volume, _ enclave.ByteAccess) error {
 		_, err := v.Header(ctx)
@@ -464,15 +445,12 @@ func lockCompatCryptsetupStep(args []string, cred *syscall.Credential, blocks bo
 	return res, nil
 }
 
-// procLocksID is how /proc/locks names a file: "MAJ:MIN:INODE", the device
-// numbers in two-digit hex. The device is part of it because every scenario
-// has a tmpfs /run of its own, and their inode numbers coincide.
+// procLocksID is how /proc/locks names a file: "MAJ:MIN:INODE", device numbers in two-digit hex.
 func procLocksID(dev, ino uint64) string {
 	return fmt.Sprintf("%02x:%02x:%d", unix.Major(dev), unix.Minor(dev), ino)
 }
 
-// flockWaiterOnFile reports whether /proc/locks shows a process BLOCKED on a
-// flock of the file procLocksID names -- the "->" lines.
+// flockWaiterOnFile reports whether /proc/locks shows a process blocked on a flock of the file.
 func flockWaiterOnFile(id string) (bool, error) {
 	f, err := os.Open("/proc/locks")
 	if err != nil {

@@ -19,48 +19,14 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// Regression tests for the header-area overlap.
-//
-// writeHeaderInternal used to SIZE THE HEADER AREA FROM THE METADATA:
-// `nextPowerOf2(len(jsonData)+1)`, floored at header.DefaultSize, while the
-// backup copy was written at a hardcoded 0x4000. Those two disagree the moment
-// the JSON outgrows the floor.
-//
-// MEASURED, marshaling this package's own metadata with MarshalIndent: a
-// keyslot costs 514 bytes, and the JSON crosses 8192 bytes at 15 keyslots --
-// well inside the 32 LUKS2 permits. At that point nextPowerOf2 jumps to 16384,
-// HeaderSize becomes 4096+16384 = 20480, the primary area spans 0..20480, and
-// the backup written at 16384 lands INSIDE it and overwrites its own JSON tail.
-// 20480 is not a power of two either, so the area size was not a legal LUKS2
-// metadata size in the first place.
-//
-// The fix does not grow the area. It cannot: the keyslots begin at 2 x area and
-// the data segment after them, both already fixed on disk, so enlarging the
-// area would move the second copy onto whatever follows it -- for this
-// library's geometry, the keyslot key material at 0x8000. Every key on the
-// device. The area is instead taken as fixed and metadata that does not fit is
-// REFUSED.
+// Header-area tests: the area is fixed and metadata that does not fit is refused, never grown over the keyslots.
 
 // keyslotJSONCost is the measured size of one keyslot in the indented JSON this
 // package writes. It is used only to choose test sizes that straddle the
 // thresholds; the tests assert on observed bytes, not on this number.
 const keyslotJSONCost = 514
 
-// padKeyslots adds synthetic keyslots to metadata until it holds n of them.
-//
-// Each clone gets its OWN area, tiled after keyslot 0's at that keyslot's size.
-// Identical offsets would be cheaper to produce but cryptsetup rejects
-// overlapping keyslot areas, and these fixtures are handed to cryptsetup: the
-// point is a header that is structurally valid and merely large.
-//
-// Each clone is also registered with the digest that covers keyslot 0. LUKS2
-// requires every keyslot to be assigned to exactly one digest -- measured:
-// without it cryptsetup reports "header.Keyslot 1 is not assigned to exactly 1 digest"
-// and fails validation -- and it is what AddKey does for a real keyslot.
-//
-// The cloned key material is of course garbage, which does not matter. header.Keyslot
-// 0 is tried first in ascending scan order and succeeds before any clone is
-// reached, and cryptsetup's luksDump does not decrypt keyslots at all.
+// padKeyslots adds synthetic, non-overlapping keyslots, each assigned to keyslot 0's digest, until metadata holds n.
 func padKeyslots(t *testing.T, metadata *header.Metadata, n int) {
 	t.Helper()
 
@@ -117,12 +83,7 @@ func jsonAreaBytes(t *testing.T, device string, offset int64, jsonSize int) []by
 	return raw
 }
 
-// TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea is the core regression test.
-//
-// It uses 16 keyslots: past the 15 at which the old sizing overflowed the
-// 12288-byte JSON area, and short of the 23 at which the metadata genuinely
-// stops fitting. In that window the old code silently corrupted the header and
-// the new code must write it cleanly.
+// TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea writes 16 keyslots and requires a clean header.
 func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	defer parallel(t)()
 
@@ -136,15 +97,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	}
 	padKeyslots(t, metadata, keyslots)
 
-	// Confirm the fixture actually straddles the old threshold. Without this,
-	// the test could pass by never reaching the condition it exists to check.
-	//
-	// TWO ORACLES, TWO QUESTIONS, and they are not interchangeable. The
-	// threshold this regression is about is a property of the INDENTED encoding
-	// the writer used at the time -- nextPowerOf2(len(indented)+1) crossing 8192
-	// is what moved the backup header -- so that measurement stays on
-	// MarshalIndent. Whether the fixture FITS is a question about the bytes the
-	// writer produces TODAY, which is header.MarshalCanonicalJSON.
+	// Confirm the fixture's indented JSON crosses 8192 bytes while its canonical encoding still fits.
 	indented, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		t.Fatalf("failed to marshal the fixture: %v", err)
@@ -219,18 +172,7 @@ func TestWriteHeaderKeepsTheBackupOutOfThePrimaryArea(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestWriteHeaderRefusesMetadataThatDoesNotFit is the other half: once the
-// metadata genuinely exceeds the container's fixed JSON area, the write is
-// refused and the device is left exactly as it was. Enlarging the area to make
-// it fit would move the second header copy onto the keyslot key material.
-//
-// HOW THE FIXTURE REACHES THE LIMIT CHANGED, and the change is the point of the
-// compact encoding. Under MarshalIndent, 32 keyslots -- the LUKS2 maximum --
-// produced 17558 bytes and were refused; the container could not hold the
-// keyslot complement the format defines. Compact, the same 32 keyslots fit with
-// room to spare (see TestWriteHeaderAcceptsTheMaximumKeyslotCount), so the
-// overflow is now reached the way a real header reaches it: a token on top of a
-// full set of keyslots.
+// TestWriteHeaderRefusesMetadataThatDoesNotFit: a token on a full keyslot set overflows the area and the device is left unchanged.
 func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	defer parallel(t)()
 
@@ -243,10 +185,7 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
 	padKeyslots(t, metadata, keyslots)
-	// Built by DECODING, because the bulk is an unmodeled member: this
-	// package stopped modeling TPM2 in #189 and carries such members through
-	// the passthrough, so a token big enough to overflow the area has to be
-	// constructed the way a real one arrives -- from JSON.
+	// Built by decoding: TPM2 members reach a token only through the passthrough.
 	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],"tpm2-blob":%q}`,
 		encodeBase64(bytes.Repeat([]byte{0x5A}, header.DefaultSize)))
 	var token LegacyToken
@@ -302,15 +241,7 @@ func TestWriteHeaderRefusesMetadataThatDoesNotFit(t *testing.T) {
 	mustDestroy(t, key)
 }
 
-// TestWriteHeaderAcceptsTheMaximumKeyslotCount is the behavioral consequence
-// of the compact encoding, asserted on a real container rather than on byte
-// counts.
-//
-// LUKS2 defines 32 keyslots. Under MarshalIndent this package could write 22 of
-// them into the 12288-byte area and refused the rest -- a container that could
-// not hold the complement the format allows, for no reason but whitespace.
-// cryptsetup, writing the same metadata through json-c, has never had that
-// limit.
+// TestWriteHeaderAcceptsTheMaximumKeyslotCount: 32 keyslots fit the 12288-byte area.
 func TestWriteHeaderAcceptsTheMaximumKeyslotCount(t *testing.T) {
 	defer parallel(t)()
 
@@ -365,9 +296,7 @@ func TestWriteHeaderRefusesOversizedTokenMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadHeader failed: %v", err)
 	}
-	// Decoded rather than constructed, for the reason given at the other
-	// oversized-token fixture: TPM2 members are unmodeled (#189) and reach a
-	// LegacyToken only through the passthrough.
+	// Decoded: TPM2 members reach a LegacyToken only through the passthrough.
 	oversized := fmt.Sprintf(`{"type":"systemd-tpm2","keyslots":["0"],`+
 		`"tpm2-blob":%q,"tpm2-pcrs":[0,7],"tpm2-pcr-bank":"sha256"}`,
 		encodeBase64(bytes.Repeat([]byte{0x5A}, header.DefaultSize)))
@@ -444,13 +373,7 @@ func deviceHead(t *testing.T, device string, n int) []byte {
 	return buf
 }
 
-// TestHeaderAreaSizeForWrite pins which area sizes a write will use.
-//
-// The accepted set is the powers of two LUKS2 admits. It matters that this
-// agrees with header.HeaderAreaOffset's accepted set on the read side: the secondary
-// offset IS the area size, so a writer that emitted a non-power-of-two would
-// produce a copy at an offset the reader rejects -- read and write disagreeing
-// about the format, which is the failure this branch exists to end.
+// TestHeaderAreaSizeForWrite: the writer accepts the same power-of-two sizes header.HeaderAreaOffset reads.
 func TestHeaderAreaSizeForWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -495,13 +418,7 @@ func TestHeaderAreaSizeForWrite(t *testing.T) {
 	}
 }
 
-// TestReadHeaderRefusesAMismatchedHeaderOffset covers the pairing check.
-//
-// The field is attacker-controlled and the caller already knows where it read
-// the copy from. A header at offset 0 claiming hdr_offset 0x4000 is in range,
-// so the #63 bound alone lets it through; before the pairing check the
-// downstream reads would then have taken the field's word for it and paired a
-// header with the wrong copy's JSON.
+// TestReadHeaderRefusesAMismatchedHeaderOffset: hdr_offset must match where the copy was read.
 func TestReadHeaderRefusesAMismatchedHeaderOffset(t *testing.T) {
 	defer parallel(t)()
 

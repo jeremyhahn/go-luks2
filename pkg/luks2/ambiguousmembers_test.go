@@ -20,7 +20,7 @@ import (
 // encoding/json binds a member to a struct field case-insensitively and lets
 // the last duplicate win; cryptsetup's json-c is case-sensitive. A header that
 // spells a modeled member twice, or in another case, reads one way here and
-// another way to cryptsetup (#248, B6).
+// another way to cryptsetup (B6).
 
 // writeHeaderJSON replaces path's JSON area, in both copies, with jsonData,
 // checksummed: a header whose bytes no writer of this package could produce.
@@ -106,13 +106,7 @@ func TestSetTokenRefusesAmbiguousMembers(t *testing.T) {
 	}
 	defer func() { _ = v.Close() }()
 
-	// A case-insensitive duplicate -- the typed Keyslots field's own spelling
-	// and an unmodeled member differing only in case -- is still caught: the
-	// write path round-trips the token through LegacyToken (toLegacyToken),
-	// whose decoder is the same case-sensitive one a header read uses. An
-	// EXACT duplicate key ("keyslots" twice) is not: encoding/json collapses
-	// it to the last occurrence while decoding the caller's JSON into Token's
-	// Members map, before this package ever sees two keys to compare.
+	// A case-insensitive duplicate is caught through toLegacyToken; an exact duplicate key collapses in encoding/json before this package sees it.
 	doc := `{"type":"systemd-recovery","keyslots":["0"],"Keyslots":["7"]}`
 	var token Token
 	if err := json.Unmarshal([]byte(doc), &token); err != nil {
@@ -128,9 +122,7 @@ func TestSetTokenRefusesAmbiguousMembers(t *testing.T) {
 	}
 }
 
-// TestReadHeaderRequiresTheMandatoryObjects: cryptsetup refuses a header whose
-// keyslots, tokens, segments, digests or config member is absent or is not an
-// object, and the typed decode cannot tell those from an empty object (#248).
+// TestReadHeaderRequiresTheMandatoryObjects: keyslots, tokens, segments, digests and config must be present objects.
 func TestReadHeaderRequiresTheMandatoryObjects(t *testing.T) {
 	defer parallel(t)()
 

@@ -177,9 +177,7 @@ func TestReadHeaderCopyFromRefusesAnUnsupportedVersion(t *testing.T) {
 	if _, err := f.WriteAt(versionBytes[:], 6); err != nil {
 		t.Fatal(err)
 	}
-	// The checksum no longer matches the mutated version byte, so this also
-	// exercises that the version check runs before the checksum (the version
-	// field precedes it and is read first).
+	// The checksum no longer matches, so this also checks that the version check runs first.
 	_, _, err := ReadHeaderCopyFrom(f, PrimaryHeaderOffset)
 	if err == nil {
 		t.Fatal("want an error")
@@ -313,12 +311,7 @@ func TestValidateHeaderChecksumRefusesAShortArea(t *testing.T) {
 	}
 }
 
-// TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField pins
-// the DISTINCT sentinel errChecksumBufferTooShort: a declared area size
-// outside the legal range and a buffer too short to hold the checksum field
-// are different faults, and the test checks that this guard -- not some
-// other one -- is the one that fires, at the exact boundary in both
-// directions.
+// TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField pins errChecksumBufferTooShort at the exact boundary in both directions.
 func TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField(t *testing.T) {
 	reader := bytes.NewReader(make([]byte, HeaderSize*2))
 	hdr := &BinaryHeader{Version: Version}
@@ -357,10 +350,7 @@ func TestValidateHeaderChecksumRefusesABufferTooShortForTheChecksumField(t *test
 		})
 	}
 
-	// The boundary in the other direction, so the comparison cannot be
-	// off by one: a buffer exactly large enough for the checksum field gets
-	// PAST this guard. It then fails on the checksum itself, which is a
-	// different error, and that difference is the assertion.
+	// A buffer exactly large enough passes this guard and fails on the checksum instead.
 	t.Run("exactly large enough is not refused by this guard", func(t *testing.T) {
 		err := ValidateHeaderChecksum(hdr, reader, 0, need)
 		if errors.Is(err, errChecksumBufferTooShort) {

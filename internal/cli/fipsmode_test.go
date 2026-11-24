@@ -20,11 +20,7 @@ import (
 // non-FIPS parent built for it.
 const fipsModeChildEnv = "LUKS2_CLI_FIPS_MODE_VOLUME"
 
-// docs/fips/cli.md: what the commands do in FIPS mode. FIPS mode is fixed at
-// process start, so the rows run in a child started under
-// GODEBUG=fips140=only, on an Argon2id volume a non-FIPS process built (FIPS
-// mode cannot write one). A FIPS-mode test binary first re-runs this test
-// with FIPS mode off, to build that volume.
+// docs/fips/cli.md rows run in a child under GODEBUG=fips140=only, on an Argon2id volume built outside FIPS mode.
 func TestFIPSModeCLIRows(t *testing.T) {
 	if path := os.Getenv(fipsModeChildEnv); path != "" {
 		if !fipsProcess {

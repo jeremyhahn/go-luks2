@@ -1,34 +1,9 @@
-# Runner labels (ruling 633): the checker preflight's step `Runner labels
-# (ruling 633)` in .github/workflows/ci.yml runs as
-# `python3 -I .github/scripts/runner_labels.py` from the repository root. It
-# reads every file under .github/workflows; its rules are in that step's
-# comment. The step `Runner labels self-test` runs this file on every fixture
-# test/ci/workflows/testdata/runnerlabels/manifest.txt lists. It lives
-# here, out of ci.yml's run block, and carries the v1.51/v1.52
-# logic: the `pull_request_target` HOSTED_CTX entries, the preflight
-# `RO_ALLOW` fork clause, and the `not fork` guard on the overflow and unset
-# exemptions.
+# Runner-label checker run by ci.yml's preflight as `python3 -I .github/scripts/runner_labels.py`; reads every workflow under .github/workflows.
 import json, os, re, sys
 
-# Resume 16: the line reader is the gate on its own. It reads a strict
-# subset of YAML, the forms this repository's workflows use: one
-# document (one optional opening `---`), a block mapping at column 0,
-# block mappings and block sequences indented with spaces, plain,
-# single-quoted or escape-free double-quoted scalars, one-line flow
-# sequences of scalars, and `|`/`>` block scalars (no indentation
-# indicator) except for runs-on. Anything else anywhere in the file
-# fails closed (s): a tab, a `?` key, an anchor, alias or tag, a `<<`
-# merge key, a flow mapping, a nested or multi-line flow sequence, a
-# `\` in a double-quoted scalar, a key outside printable ASCII, a
-# block-scalar runs-on, a second document. PyYAML, where installed,
-# cross-checks (y); both must accept.
+# The line reader accepts only the strict YAML subset these workflows use and fails closed on anything else; PyYAML, where installed, cross-checks.
 
-# Reads each file under .github/workflows as text (no YAML library): the
-# top-level `on:` keys, and each job's `runs-on` and `if`. A job names
-# `release` when that label appears in its runs-on, plain, in a list or as a
-# quoted string in an expression. Its `if` passes only in the allow-listed
-# form (ALLOWED, release_terms): no value is sampled or evaluated, so a
-# condition built any other way (format(), case, ||) fails closed.
+# Reads top-level on: keys and each job's runs-on and if; an if outside the allow-listed form fails closed.
 U = object()  # unknown value
 OPEN = "$" "{{"  # split, so the runner does not read it as an expression
 ALLOWED = ("a tag push: an `if:` whose top-level `&&` terms include `github.event_name == 'push'` and one of "
@@ -314,13 +289,7 @@ def ind(line):
 
 
 def value_lines(lines, i):
-    # Resume 21: the indices of the non-blank lines in the value of the key on
-    # line i, comment lines too. Blank and comment lines are skipped before
-    # the indentation test, so a comment never ends a value: a comment at or
-    # left of the key's column belongs to it only when a value line follows
-    # (a trailing one does not). After a plain key with no inline value, `- `
-    # lines at the key's own column are its block list (YAML's compact
-    # sequence), read as if indented.
+    # Indices of the non-blank lines in the value of the key on line i, comment lines included.
     base, out, low = ind(lines[i]), [], []
     head = strip_comment(lines[i]).strip()
     compact = head.endswith(":") and not head.startswith("-")
@@ -358,9 +327,7 @@ MULTI = object()  # a value that is a block scalar or spans lines
 
 
 def one_line(lines, i, inline):
-    # A release job's `if:` (fails closed): the YAML scalar on line i alone,
-    # its comment cut as YAML cuts it, or MULTI. A quoted scalar ends at its
-    # closing quote ('' or \ escapes); a plain one at its first ` #`.
+    # A release job's if: scalar on line i with its comment cut as YAML cuts it, or MULTI; fails closed.
     v = inline.strip()
     if deeper(lines, i) or not v or v[0] in "|>":
         return MULTI
@@ -391,11 +358,7 @@ RO_KEY = re.compile(r"""(?:^|[\s{,])['"]?[\w-]+['"]?[ \t]*:(?:[ \t]|$)""")
 
 
 def ro_mapping(t):
-    # Resume 20: a mapping runs-on (the text body() joins, one line) is one
-    # `labels:` key; its value is read as a runs-on value is (a label, a flow
-    # list, or a block list, which body() joins to `- a - b`). A block scalar,
-    # `group:`, another key or no value raises (fails closed). No pattern
-    # here crosses a line or a list item. Any other text is returned as is.
+    # A mapping runs-on is one labels: key read like a runs-on value; anything else raises.
     if not RO_MAP.match(t):
         return t
     m = re.fullmatch(r"labels:[ \t]+([^\n]+)", t)
@@ -503,35 +466,22 @@ def triggers(lines):
     return set()
 
 
-# v1.43 (ruling 833): the standard GitHub-hosted images, free on a public
-# repository; a larger runner (cores, large, xlarge, gpu) bills even there.
+# Standard GitHub-hosted images; larger runners bill even on a public repository.
 STANDARD = re.compile(r"(ubuntu-(latest|24\.04|22\.04)(-arm)?|ubuntu-slim)")
 LARGER = re.compile(r"(cores|xlarge|large|gpu)", re.I)
 WAIVER = re.compile(r"#\s*self-hosted:\s*(hardware|oversize|credential)\s*:\s*\S")
-BARE = re.compile(r"#\s*self-hosted:")  # v1.46: a waiver whose reason names no category
-# v1.47 (ruling 1007): a review-only label runs only in code-review.yml, and
-# only with its own category; credential: is the codex job's alone.
+BARE = re.compile(r"#\s*self-hosted:")  # a waiver whose reason names no category
+# A review-only label runs only in code-review.yml with its own category.
 REVIEW = {"codex": "credential", "qwen": "hardware"}
 REVIEW_FILES = {"code-review.yml", "code-review.yaml"}
 REVIEW_TOKEN = re.compile(r"(?<![\w.-])['\"]?(codex|qwen)['\"]?(?![\w-])", re.I)
 GH = "https://github.com"
-# v1.48: ci.yml's preflight runner selection (v1.54:
-# the Balanced runner pool step) outputs runs-on JSON,
-# "ubuntu-latest" or the Dells' self-hosted list ("overflow" below). In ci.yml only, a
-# runs-on that reads exactly these outputs is checked under both: the
-# default must be a standard image, as (c) asks of every job, and the
-# overflow may also be exactly the list its output names. Any other
-# self-hosted value still needs its waiver.
+# ci.yml's runner selection outputs: a standard image by default, or the self-hosted overflow list.
 SEL_FILES = {"ci.yml", "ci.yaml"}
 SEL_OUT = {"needs.preflight.outputs.runner": "bigdisk",
            "needs.preflight.outputs.runner_docker": "bigdisk-docker"}
 OVERFLOW = [["self-hosted", "linux", "x64", v] for v in SEL_OUT.values()]
-# v1.49: ci.yml's preflight job alone may read the
-# repository variable CI_PREFLIGHT_RUNS_ON. Its runs-on is checked in
-# two states of its own, in place of the selection's: unset, where
-# exactly [self-hosted, linux, x64, bigdisk] passes too, and set to the
-# fallback `"ubuntu-latest"`, where it must give a standard image on
-# every event. Another job that reads the variable reads an unknown.
+# Only ci.yml's preflight job may read CI_PREFLIGHT_RUNS_ON; it is checked unset and set to ubuntu-latest.
 PRE_JOB = "preflight"
 PRE_VAR = "vars.ci_preflight_runs_on"
 PRE_READ = re.compile(r"(?<![\w.])vars\.CI_PREFLIGHT_RUNS_ON(?![\w-])", re.I)
@@ -545,12 +495,7 @@ HOSTED_CTX = [  # (event, ref, head repo) on github.com; o/r is this repository
 ]
 
 
-# Resume 15 (#494 round 4): a runs-on expression is evaluated only when its
-# text, whitespace-normalised, is one this repository's workflows use
-# (RO_ALLOW, with the jobs that use it); any other expression counts as
-# reaching `release` and needs the tag-push `if:`. Nothing is sampled
-# from its literals: head_ref, base_ref and event values are the
-# attacker's, so no sample set of them is complete.
+# Only allow-listed runs-on expressions (RO_ALLOW) are evaluated; any other counts as reaching release.
 RO_ALLOW = {
     # Only a push to main and a same-repository pull request read the variable.
     "github.server_url == 'https://github.com' && ((github.event_name == 'push' && github.ref == 'refs/heads/main') || "
@@ -558,8 +503,7 @@ RO_ALLOW = {
     "&& fromJSON(vars.CI_PREFLIGHT_RUNS_ON || "
     "'[\"self-hosted\",\"linux\",\"x64\",\"bigdisk\"]') || 'ubuntu-latest'": "ci.yml: preflight",
     "github.server_url == 'https://github.com' && 'ubuntu-latest' || 'bigdisk'": "code-review.yml: scope, gate",
-    # ci-template v1.54: every other ci.yml job reads the pool that
-    # preflight's Balanced runner pool step picks.
+    # Every other ci.yml job reads the pool preflight picks.
     "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner_docker) || 'bigdisk'":
         "ci.yml: every job but preflight and CI Gate",
     "github.server_url == 'https://github.com' && fromJSON(needs.preflight.outputs.runner || '\"ubuntu-latest\"') || 'ci-gate'":
@@ -589,13 +533,11 @@ def hosted_cands(text):
 def hosted_get(ev, ref, head, sel=None, hr="feature", br="main"):
     def get(path):
         p = path.lower()
-        if sel and p in SEL_OUT:  # v1.48: the selection output, as JSON text
-            # v1.52: the step outputs the hosted default for a fork's head.
-            # Its case statement covers pull_request and pull_request_target,
-            # so both are modelled here (the template models pull_request).
+        if sel and p in SEL_OUT:  # the selection output, as JSON text
+            # The step outputs the hosted default for a fork's head under pull_request and pull_request_target.
             fork_pr = ev in ("pull_request", "pull_request_target") and head == "fork/r"
             return json.dumps("ubuntu-latest" if sel == "default" or fork_pr else ["self-hosted", "linux", "x64", SEL_OUT[p]])
-        if sel in ("unset", "set") and p == PRE_VAR:  # v1.49: unset, or the fallback switch
+        if sel in ("unset", "set") and p == PRE_VAR:  # unset, or the fallback switch
             return None if sel == "unset" else json.dumps("ubuntu-latest")
         if p == "github.server_url":
             return GH
@@ -644,7 +586,7 @@ def review_labels(text):
 
 
 def review_finding(path, where, ro, ro_line):
-    # v1.47 (ruling 1007): label and category together, whatever the waiver says.
+    # Label and category together, whatever the waiver says.
     names = review_labels(ro)
     m = WAIVER.search(ro_line)
     cat = m.group(1) if m else None
@@ -665,10 +607,7 @@ def review_finding(path, where, ro, ro_line):
 
 
 def release_reason(text, sels=(None,)):
-    # Why a runs-on may name `release`, or None: the label in the text,
-    # an expression not in RO_ALLOW, or an allow-listed one that yields it
-    # on a github.com event (an unknown value is (c)'s).
-    # Resume 20: GitHub matches labels case-insensitively, so this does too.
+    # Why a runs-on may name release, or None; labels match case-insensitively.
     if re.search(r"(?<![\w.-])['\"]?release['\"]?(?![\w-])", text, re.I):
         return "names `release`"
     u = ro_unlisted(text)
@@ -738,13 +677,7 @@ QUOTED_KEY = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"\\\\]|\\\\.)*\")[ \t]*:(?=[ \
 
 
 def quote_open(v):
-    # Resume 17: whether a value (comment cut) leaves a quoted scalar open
-    # at the end of its line. A quote starts one only at the start of the
-    # value or of a flow list item (after `[` or `,`); elsewhere it is
-    # plain text (`it's`). '' escapes in '...', \\ in "...".
-    # Resume 18: also after `: ` or `? ` (a flow pair's value or key; in
-    # block context a plain `: ` is not YAML), and after an anchor or tag
-    # that starts a value, so `[run: &x "echo]` is open too.
+    # Whether a value leaves a quoted scalar open at the end of its line.
     def after(j):
         return j + len(v[j:]) - len(v[j:].lstrip(" "))
     k, starts = 0, {0}
@@ -791,12 +724,7 @@ def flow_pair(v):
 
 
 def subset(lines):
-    # Resume 16: the first line outside the strict subset (see the top),
-    # as "line n: reason", or None. Lines inside a block scalar are text.
-    # The whole file is read, so `on:` and `jobs:` are both covered.
-    # Resume 17: a quoted scalar left open at the end of a line, and a
-    # line indented between the columns of the nodes it would continue
-    # (a column-0/1 line inside a quoted scalar), fail.
+    # The first line outside the strict subset as "line n: reason", or None.
     scalar = None  # column a block scalar's text lines must exceed
     cols = []  # columns of the open nodes, increasing
     for n, s in enumerate(lines, 1):
@@ -899,16 +827,7 @@ def waived_unsafe(ro):
     return None
 
 
-# Resume 14: a second layer. The workflow is loaded with PyYAML's safe
-# loader (python3-yaml, which ubuntu-latest ships; nothing is installed),
-# so anchors, tags, aliases, merge keys and escapes read as YAML reads
-# them. Every job whose parsed runs-on is or may be `release` (a label
-# that case-folds to it, only GENERIC labels, a value that is not a
-# string, a group, or an expression that yields it, only GENERIC
-# labels or an unknown on a github.com event) must
-# have a parsed `if:` the allowlist above accepts. Both layers must
-# accept; a file PyYAML cannot load fails closed (y). Resume 16: with
-# no PyYAML (the bigdisk runner) the strict line reader decides alone.
+# Second layer: PyYAML's safe loader; every job that may run on release needs an accepted if:, and both layers must accept.
 def yaml_loader(yaml):
     class Loader(yaml.SafeLoader):  # `on`, `yes`, `no`, `off` stay strings, as in YAML 1.2
         pass
@@ -1102,7 +1021,7 @@ def check(path):
                     continue
                 rel = release_reason(ro) if ro is not None else None
                 if ro is not None and not rel:
-                    # v1.43 (ruling 833): hosted first.
+                    # Hosted first.
                     if LARGER.search(ro) and re.search(r"ubuntu|windows|macos", ro):
                         bad.append(f"{where}: (d) names a larger GitHub-hosted runner ({ro}); it bills on a public repository")
                         continue
@@ -1119,7 +1038,7 @@ def check(path):
                     off = []
                     sels = ("default", "overflow") if path.replace("\\", "/").rsplit("/", 1)[-1] in SEL_FILES else (None,)
                     if sels[0] is not None and job == PRE_JOB and PRE_READ.search(ro):
-                        sels = ("unset", "set")  # v1.49: its own two states, no selection output
+                        sels = ("unset", "set")  # its own two states, no selection output
                     for ev, ref, head, hr, br in hosted_cands(ro):
                         for sel in sels:
                             try:
@@ -1127,21 +1046,7 @@ def check(path):
                             except ValueError as e:
                                 off.append(f"{ev} ({ref}): cannot be read ({e})")
                                 continue
-                            # Resume 23 (ci-template v1.51, v1.52; the stricter
-                            # kept): a fork's head, under pull_request or
-                            # pull_request_target, gets neither exemption.
-                            # Deliberately stricter than the template: this
-                            # condition does not require the event to be one
-                            # of the workflow's triggers (the template's
-                            # `and ev in on`). With v1.54's selection step
-                            # taken, hosted_get's `fork_pr` rule gives a
-                            # fork's head the hosted default the step
-                            # outputs, so an overflow for a fork is still
-                            # refused here. The unset
-                            # guard is unreachable while RO_ALLOW's only
-                            # CI_PREFLIGHT_RUNS_ON form carries the fork clause
-                            # (a fork gets ubuntu-latest first); it is kept so
-                            # a fork-less form added there is still refused.
+                            # A fork's head gets neither exemption under pull_request or pull_request_target.
                             fork = head == "fork/r"
                             if got is not None and sel == "overflow" and got in OVERFLOW and not fork:
                                 continue

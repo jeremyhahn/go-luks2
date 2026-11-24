@@ -23,10 +23,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// chunk is how much one write or one verification read covers: a multiple of
-// the O_DIRECT alignment and of the AES block size, so every chunk starts on
-// a boundary a counter-mode stream can be regenerated from on its own, and
-// ctx is checked once per chunk.
+// chunk is the write and verification-read size, aligned for O_DIRECT and AES so each chunk's stream regenerates on its own.
 const chunk = 1024 * 1024
 
 // defaultCryptsetupLockDir is cryptsetup's own locking directory.
@@ -142,11 +139,7 @@ func sanitize(ctx context.Context, path string, p Params, s sys) error {
 	// Every pass was synced as it ended (writePass), so the last one is on
 	// the medium before it is verified.
 
-	// Verification reads the medium PAST THE PAGE CACHE, through the locked
-	// descriptor's own /proc/self/fd entry rather than path: the claim
-	// targets exactly the inode that was locked (what is verified is what was locked and written), and
-	// resolving path again here would let a retargeted symlink verify one
-	// device while the passes wrote another.
+	// Verify past the page cache, through the locked descriptor's /proc/self/fd entry, not path.
 	if verify {
 		mediumPath := "/proc/self/fd/" + strconv.Itoa(int(locked.File().Fd())) // #nosec G115 -- a descriptor number fits an int
 		if err := verifyWrite(ctx, path, mediumPath, size, last, p.Progress, totalPasses, s); err != nil {
@@ -154,9 +147,7 @@ func sanitize(ctx context.Context, path string, p Params, s sys) error {
 		}
 	}
 
-	// Best effort, and documented so on Params.Discard: a device that does
-	// not support TRIM has already been overwritten by the passes above, so
-	// its refusal is not a failure of the wipe.
+	// Best effort: a device without TRIM is already overwritten.
 	if p.Discard {
 		_ = device.Discard(f, size)
 	}
@@ -164,10 +155,7 @@ func sanitize(ctx context.Context, path string, p Params, s sys) error {
 	return nil
 }
 
-// resolvePatterns decides the pass sequence and the verification flag from
-// p: Standard, if set, overrides Patterns; an empty sequence either way is a
-// single Zeros pass; Verify overrides whatever Standard would otherwise
-// decide.
+// resolvePatterns returns the pass sequence and verify flag: Standard overrides Patterns, empty means one Zeros pass, Verify overrides Standard.
 func resolvePatterns(p Params) (patterns []Pattern, verify bool) {
 	if p.Standard != NoStandard {
 		patterns = p.Standard.Patterns()
@@ -266,10 +254,7 @@ type passFile interface {
 	Sync() error
 }
 
-// writePass performs one wipe pass, writing stream over [0, size) of f in
-// chunk-sized writes, checking ctx once per chunk, and syncing f when the
-// pass is complete: a pass still in the page cache when the next one starts
-// can be coalesced with it and never reach the medium.
+// writePass writes stream over [0, size) of f in chunks, checking ctx per chunk, and syncs f at the end.
 func writePass(ctx context.Context, f passFile, path string, size int64, stream *passStream,
 	progress func(Progress), passNum, totalPasses int) error {
 	buffer := make([]byte, chunk)

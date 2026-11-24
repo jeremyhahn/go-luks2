@@ -11,15 +11,7 @@ import (
 	"testing"
 )
 
-// config.requirements (#152).
-//
-// LUKS2 spells this member as an OBJECT carrying a mandatory array. It was
-// modeled as a flat []string, so the decode failed outright and this package
-// could not read ANY container mid-reencryption -- not "read it with a member
-// missing", unreadable. That inverted the mechanism: requirements exists so an
-// implementation that does not understand a feature refuses the container
-// instead of damaging it, and the member carrying that warning was the one
-// that would not parse.
+// config.requirements is an object carrying a mandatory array.
 
 // realRequirementsConfig is the shape cryptsetup writes during an online
 // reencryption.
@@ -83,9 +75,7 @@ func TestRequirementsRoundTripsWithUnmodeledMembers(t *testing.T) {
 	}
 }
 
-// TestAnUnimplementedRequirementRefusesTheWrite is the decision this issue
-// carried: the refusal lands on the WRITE, because that is where corruption
-// happens, and it lands before the device is touched.
+// TestAnUnimplementedRequirementRefusesTheWrite: the refusal lands on the write, before the device is touched.
 func TestAnUnimplementedRequirementRefusesTheWrite(t *testing.T) {
 	metadata := minimalValidMetadata()
 	metadata.Config.Requirements = &Requirements{Mandatory: []string{"online-reencrypt-v3"}}
@@ -114,12 +104,7 @@ func TestAnUnimplementedRequirementRefusesTheWrite(t *testing.T) {
 	}
 }
 
-// TestInlineHWTagsIsKeptAndRefusesTheWrite is LUKS2 On-Disk Format 1.1.4's
-// inline-hw-tags requirement: the segment's authentication tags live in the
-// device's per-sector inline hardware tags, with dm-crypt alone and every
-// dm-integrity option ignored. This package has no inline hardware tag
-// support, so the flag is read and re-encoded exactly, and a write refuses
-// with the requirement named rather than dropping it.
+// TestInlineHWTagsIsKeptAndRefusesTheWrite: inline-hw-tags is re-encoded exactly and a write refuses naming it.
 func TestInlineHWTagsIsKeptAndRefusesTheWrite(t *testing.T) {
 	const config = `{"json_size":"12288","keyslots_size":"16744448","requirements":{"mandatory":["inline-hw-tags"]}}`
 

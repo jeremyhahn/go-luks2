@@ -113,10 +113,7 @@ func errString(err error) string {
 	return err.Error()
 }
 
-// dmKind is errs.KindOf for a device-mapper or /dev node step, with one
-// addition: a refusal for lack of privilege (EPERM, EACCES) is
-// ErrPermissionDenied rather than the fallback. A kind already classified
-// further down, and cancellation, keep precedence.
+// dmKind is errs.KindOf for a dm or /dev step, mapping EPERM and EACCES to ErrPermissionDenied.
 func dmKind(err, fallback error) error {
 	if kind := errs.KindOf(err, nil); kind != nil {
 		return kind

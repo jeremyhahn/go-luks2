@@ -40,10 +40,7 @@ func runVolume(t *testing.T, base string) string {
 	return name
 }
 
-// releaseVolume closes volumeName through pkg/dmcrypt.Deactivate and FAILS
-// THE TEST if a device-mapper mapping is left behind on the host (#100),
-// the same reasoning as every other test/integration/<pkg> package's own
-// releaseVolume.
+// releaseVolume closes volumeName through pkg/dmcrypt.Deactivate and fails the test if a mapping is left behind.
 func releaseVolume(t *testing.T, volumeName string) {
 	t.Helper()
 

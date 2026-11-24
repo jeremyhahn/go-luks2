@@ -18,12 +18,7 @@ import (
 	"github.com/jeremyhahn/go-enclave"
 )
 
-// enrollRecoveryKeyForTest opens image, unlocks it with existing and enrolls
-// a fresh NewRecoveryKey, the way the pre-redesign library's
-// AddRecoveryKey(image, existing, &RecoveryKeyOptions{...}) did before B.6
-// moved it behind (*Volume).AddRecoveryKey. It returns the enrolled
-// credential's formatted text alongside the keyslot and token it was
-// recorded under.
+// enrollRecoveryKeyForTest unlocks image with existing, enrolls a new recovery key and returns its text, keyslot and token.
 func enrollRecoveryKeyForTest(t *testing.T, image string, existing []byte, opts ...Option) (credential string, keyslot, tokenID int, err error) {
 	t.Helper()
 
@@ -63,23 +58,9 @@ func enrollRecoveryKeyForTest(t *testing.T, image string, existing []byte, opts 
 	return buf.String(), enrollment.Keyslot.ID, enrollment.Token, nil
 }
 
-// Regression tests for #246 D8-D9: two enrollments at once, and a device
-// lock's own refusals. The exec-helper regressions (#246 D5-D7: how a helper
-// is found and what it inherits, a helper whose output outlives it, the
-// FIDO2 device argument) moved to pkg/keyprovider with the code they pin
-// (#271).
+// Concurrent enrollment and device-lock refusal tests.
 
-// TestConcurrentEnrollmentsKeepBothTokens is #246 D8. The token slot was
-// chosen before the keyslot was written, and each step took the device lock
-// on its own, so a second enrollment running while the first had written its
-// keyslot but not yet its token found the same slot free -- and one token
-// overwrote the other, leaving a keyslot nothing describes.
-//
-// The interleaving is forced rather than hoped for: the first enrollment is
-// held at its token write, the second is started, and the first is released
-// only once the second has opened the device for writing. Under one lock the
-// second waits there for the first; without it, it has already chosen the
-// first's token slot.
+// TestConcurrentEnrollmentsKeepBothTokens forces two enrollments to interleave at the token write; one lock keeps both tokens.
 func TestConcurrentEnrollmentsKeepBothTokens(t *testing.T) {
 	defer parallel(t)()
 	image := newImage(t, "concurrent-enroll.img")
@@ -188,8 +169,7 @@ func TestEnrollmentRefusesATokenSlotTakenUnderItsLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The locked helpers act only on a device pinned to its locked descriptor
-	// (#255); there is no device without one to hand them.
+	// The locked helpers act only on a device pinned to its locked descriptor.
 	dev := lockedDevice(t, image)
 	if err := importTokenLocked(context.Background(), dev, 0, &LegacyToken{Type: "x-new"}); !errors.Is(err, ErrNoSpace) {
 		t.Fatalf("importTokenLocked over a taken slot = %v, want ErrNoSpace", err)

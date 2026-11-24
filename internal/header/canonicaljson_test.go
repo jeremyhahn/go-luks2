@@ -14,25 +14,9 @@ import (
 	"testing"
 )
 
-// Tests for the on-disk JSON ENCODING itself: the LUKS2 metadata area holds
-// compact, unescaped JSON terminated by a single NUL, and every property that
-// makes that sentence true is asserted here.
-//
-// These are deliberately separate from the cryptsetup conformance tests,
-// which live in pkg/luks2. What the encoder does is decidable without a
-// third party -- compactness, escaping and the terminator are properties of
-// the bytes -- and a test that needs no external binary should not be made
-// to depend on one.
+// Tests for the on-disk JSON encoding: compact, unescaped, terminated by one NUL.
 
-// TestCanonicalJSONIsCompact pins the property the 12288-byte metadata area
-// actually depends on.
-//
-// json.MarshalIndent was producing 1193 bytes for the metadata json-c writes
-// in 775. That is not a cosmetic difference: EncodeMetadataForHeader REFUSES
-// metadata that does not fit and cannot enlarge the area (the keyslots and
-// the data segment are already placed), so 54% of the area was being spent
-// on whitespace and the refusal fired at a keyslot count well below
-// cryptsetup's.
+// TestCanonicalJSONIsCompact pins compact encoding, which the fixed metadata area depends on.
 func TestCanonicalJSONIsCompact(t *testing.T) {
 	encoded, err := MarshalCanonicalJSON(sampleMetadata())
 	if err != nil {
@@ -48,9 +32,7 @@ func TestCanonicalJSONIsCompact(t *testing.T) {
 		}
 	}
 
-	// Indentation shows up as a space after a structural character. A space
-	// INSIDE a string value is legal and must not be flagged, so the check is
-	// on the pairs the pretty-printer introduces.
+	// Indentation shows as a space after a structural character; spaces inside strings are legal.
 	for _, forbidden := range []string{"{ ", " }", "[ ", ", ", ": "} {
 		if bytes.Contains(encoded, []byte(forbidden)) {
 			t.Errorf("the encoding contains %q, which only a pretty-printer emits\n%s", forbidden, encoded)
@@ -84,14 +66,7 @@ func TestCanonicalJSONHasNoTrailingNewline(t *testing.T) {
 	}
 }
 
-// TestCanonicalJSONDoesNotEscapeHTML asserts the divergence that is latent
-// today and would be silent tomorrow.
-//
-// encoding/json escapes the characters < > and & as six-character escape sequences by default;
-// json-c does not. Nothing this package writes carries one of those
-// characters right now -- the label and subsystem label are BINARY header
-// fields, not JSON -- so this is asserted through a token, which is where a
-// caller-supplied string first reaches the metadata.
+// TestCanonicalJSONDoesNotEscapeHTML checks < > & are not escaped, as json-c does not escape them, through a token.
 func TestCanonicalJSONDoesNotEscapeHTML(t *testing.T) {
 	metadata := sampleMetadata()
 	metadata.Tokens["0"] = &Token{
@@ -127,29 +102,12 @@ func TestCanonicalJSONDoesNotEscapeHTML(t *testing.T) {
 	}
 }
 
-// TestNoObjectWithACustomMarshalerEscapesHTML covers EVERY object that
-// implements MarshalJSON, not just the one that was broken when this was
-// written.
-//
-// The drift this prevents has already happened once. MarshalCanonicalJSON
-// turns escaping off on the outer encoder, but a type implementing
-// Marshaler is encoded by the bytes it RETURNS -- the outer encoder compacts
-// them and, with escaping off, neither adds escapes nor removes ones
-// already there. So any of these methods that reaches for json.Marshal
-// internally reintroduces exactly the escapes this package turned off, and
-// does it on the members most likely to carry those characters: a foreign
-// object's strings and the names of members this package does not model.
+// TestNoObjectWithACustomMarshalerEscapesHTML covers every type implementing MarshalJSON, since a Marshaler's own bytes are kept as returned.
 func TestNoObjectWithACustomMarshalerEscapesHTML(t *testing.T) {
 	// The value carries all three characters encoding/json escapes by default.
 	const hostile = `a<b>c&d`
 
-	// The hostile string goes in a MODELED field, because that is the half the
-	// typed marshal encodes. An unmodeled member would NOT catch this: its raw
-	// bytes are carried through mergeInto with json.Compact, which does not
-	// escape, so the value never passes through json.Marshal at all.
-	//
-	// Each case also carries an unmodeled member, so the merge path is
-	// exercised in the same pass.
+	// The hostile string goes in a modeled field; each case also carries an unmodeled member to exercise the merge path.
 	tests := []struct {
 		name string
 		in   string

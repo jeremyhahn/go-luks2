@@ -24,27 +24,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The tests in this file exist because the three that were already here did
-// not. All three asserted only `iterations >= 1000`, which the hardcoded 100000
-// fallback satisfied, so nothing pinned the behavior and a one-to-two order of
-// magnitude weakening of every pbkdf2 keyslot survived five merges and three
-// releases of green suites (issue #52).
-//
-// They are built to two rules the fix is worthless without:
-//
-//   - Every assertion here fails against the old implementation, and the
-//     arithmetic ones do so WITHOUT depending on how fast or how busy this
-//     machine is. The calibration takes its timer as a parameter, so the unit
-//     tests hand it a machine that hashes at a KNOWN rate (knownRate) and
-//     assert the exact count that rate buys -- including a probe faster than a
-//     millisecond, which is the exact shape of #52 and is now caught in the
-//     -race build as well as the ordinary one.
-//   - No unit verdict depends on the wall clock (#233). The real-work checks,
-//     whose answer moves with the hardware, are benchmarks
-//     (BenchmarkPBKDF2CalibrationCostsItsBudget and its digest sibling), run
-//     by `make test-calibration` on their own, timed in thread CPU time. There
-//     is no t.Skip and no testing.Short() anywhere -- this project's testing
-//     rules bar both outright.
+// Calibration tests inject a known hash rate and assert exact counts; real-work checks are benchmarks run by make test-calibration.
 
 // knownRate is a pbkdf2Timer for a machine that derives at exactly
 // perIteration, whatever else it is doing. It records the output size and the
@@ -83,12 +63,7 @@ func threadCPUPBKDF2(hashFunc func() hash.Hash, iterations, keySize int) (time.D
 	return time.Duration(end.Nano() - start.Nano()), nil
 }
 
-// checkCalibrationCost is the real-work check behind the calibration
-// benchmarks: calibrate with the real hash timed in thread CPU time, derive at
-// the count it chose, and require the count to be within 4x of what that
-// derivation's own CPU rate says the target buys -- clamped, as the
-// calibration clamps, to the floor and the header ceiling. A floor or ceiling
-// that binds is the clamp working, not an overrun.
+// checkCalibrationCost calibrates and derives with the real hash in thread CPU time and requires the count within 4x of the target, after clamping.
 func checkCalibrationCost(b *testing.B, hashAlgo string, keySize, targetMs int, calibrate func(pbkdf2Timer) (int, error)) {
 	b.Helper()
 	iterations, err := calibrate(threadCPUPBKDF2)
@@ -113,20 +88,7 @@ func checkCalibrationCost(b *testing.B, hashAlgo string, keySize, targetMs int, 
 	}
 }
 
-// TestBenchmarkPBKDF2CalibratesToRequestedTime is the test that would have
-// caught issue #52: the count the calibration returns is the one that costs the
-// requested time at the rate the machine was measured to hash at.
-//
-// The rate is injected (#233). This used to run the returned count on the wall
-// clock and accept anything from a tenth to ten times the budget -- a band
-// that wide because a busy runner moved it, and still a verdict that depended
-// on the runner. On a known rate the expected count is exact.
-//
-// The 360ns case is #52 itself. Its first probe of 1000 iterations takes
-// 0.36ms; the old implementation gated on elapsed.Milliseconds() > 0, read
-// that as zero and returned a hardcoded 100000 -- against the 5,555,555 the
-// 2000ms budget buys at that rate. Under -race the real probe used to slow
-// past 1ms and hide the defect; an injected rate cannot be slowed.
+// TestBenchmarkPBKDF2CalibratesToRequestedTime: at an injected rate the count is exactly what the budget buys, including sub-millisecond probes.
 func TestBenchmarkPBKDF2CalibratesToRequestedTime(t *testing.T) {
 	for _, tc := range []struct {
 		hashAlgo     string
@@ -168,14 +130,7 @@ func TestBenchmarkPBKDF2CalibratesToRequestedTime(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2ScalesWithRequestedTime pins the same property from the
-// other side: on one machine, twenty times the budget buys twenty times the
-// iterations. The old implementation returned the same 100000 for both, a
-// ratio of 1.
-//
-// On a known rate (#233) the ratio is exact. It used to be two real
-// calibrations back to back, whose ratio on a loaded machine ranged from 2.57
-// to 7.13 for budgets 4x apart, which is why the band had to be 4..100.
+// TestBenchmarkPBKDF2ScalesWithRequestedTime: twenty times the budget buys twenty times the iterations.
 func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
 	defer parallel(t)()
 
@@ -206,29 +161,7 @@ func TestBenchmarkPBKDF2ScalesWithRequestedTime(t *testing.T) {
 	}
 }
 
-// TestBenchmarkPBKDF2MeetsRecommendedMinimum is the hardware-independent form
-// of the regression: at the library's own default budget the count must be at
-// least the OWASP recommendation for the hash.
-//
-// No timing is involved, so it holds on every machine. The old implementation
-// returned 100000 at this budget, six times under the sha256 minimum, and this
-// fails against it deterministically.
-//
-// # The -race inversion, which is the trap in this whole subsystem
-//
-// It fails against it deterministically IN AN ORDINARY BUILD. Under -race the
-// instrumentation slows the old probe past the 1ms threshold its gate tested,
-// so the gate PASSES, the extrapolation runs, and the broken implementation
-// returns a plausible 500000-1000000 -- above this floor, and scaling correctly
-// with the budget. Measured, not reasoned: every test in this file passes
-// against the restored defect under -race.
-//
-// The consequence is not about these tests, it is about how they are RUN. The
-// defect exists only in the uninstrumented build, so a suite executed solely
-// under -race cannot see it -- which is how it survived five merges of green
-// CI. `make test-calibration` runs these tests without -race for exactly that
-// reason and is wired into `make ci`; do not consolidate it into the -race
-// unit-test target on the grounds that it duplicates coverage. It does not.
+// TestBenchmarkPBKDF2MeetsRecommendedMinimum: at the default budget the count is at least the OWASP recommendation. make test-calibration runs without -race, because -race hides the slow-probe defect.
 func TestBenchmarkPBKDF2MeetsRecommendedMinimum(t *testing.T) {
 	defer parallel(t)()
 
@@ -305,15 +238,7 @@ func TestBenchmarkPBKDF2RejectsUnusableTarget(t *testing.T) {
 	}
 }
 
-// TestCalibratePBKDF2FailsClosedWhenUnmeasurable exercises the path a stopped
-// clock reaches: no probe up to the ceiling ran long enough to be timed.
-//
-// It is driven through the probe bounds rather than through a fake clock, which
-// is why calibratePBKDF2 takes them. A floor of an hour is never cleared, and a
-// ceiling at the starting probe stops the doubling after one round -- so the
-// failure is deterministic and costs one 1000-iteration derivation.
-//
-// This is the case the old implementation answered with `return 100000, nil`.
+// TestCalibratePBKDF2FailsClosedWhenUnmeasurable: no probe up to the ceiling is timeable, so calibration fails.
 func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 	hashFunc, err := getPBKDF2HashFunc("sha256", fips.Probe)
 	if err != nil {
@@ -349,9 +274,7 @@ func TestCalibratePBKDF2FailsClosedWhenUnmeasurable(t *testing.T) {
 	}
 }
 
-// TestCalibratePBKDF2StopsDoublingAtTheCeiling pins that the ceiling bounds the
-// WORK and not just the loop. A clock that never advances must not be answered
-// by a derivation that runs for minutes before failing.
+// TestCalibratePBKDF2StopsDoublingAtTheCeiling: the ceiling bounds the work, not just the loop.
 func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	hashFunc, err := getPBKDF2HashFunc("sha256", fips.Probe)
 	if err != nil {
@@ -370,11 +293,7 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 		t.Fatalf("got error %v, want a *KDFCalibrationError", err)
 	}
 
-	// This is also what pins the DOUBLING itself. An implementation that went
-	// back to one fixed probe would report pbkdf2ProbeStart here, whatever floor
-	// it was given -- and a fixed probe is half of what issue #52 was: no single
-	// iteration count can be a meaningful measurement on both a fast server and
-	// a slow board.
+	// This also pins the doubling: a fixed probe would report pbkdf2ProbeStart.
 	if calErr.Probe == pbkdf2ProbeStart {
 		t.Fatalf("the probe never grew past its starting size of %d; the calibration is not scaling the probe to the machine", pbkdf2ProbeStart)
 	}
@@ -386,11 +305,7 @@ func TestCalibratePBKDF2StopsDoublingAtTheCeiling(t *testing.T) {
 	}
 }
 
-// BenchmarkPBKDF2CalibrationCostsItsBudget is the real-work check for the
-// keyslot calibration: the real hash, calibrated and derived, in thread CPU
-// time. A benchmark, so the unit suite never runs it (#233); `make
-// test-calibration` runs it once, uninstrumented, and fails the build on it.
-// See checkCalibrationCost for the band.
+// BenchmarkPBKDF2CalibrationCostsItsBudget is the real-work keyslot calibration check, run by make test-calibration; see checkCalibrationCost.
 func BenchmarkPBKDF2CalibrationCostsItsBudget(b *testing.B) {
 	const targetMs = 500
 	for _, tc := range []struct {
@@ -494,13 +409,7 @@ func TestScalePBKDF2IterationsClamps(t *testing.T) {
 	}
 }
 
-// TestCreateKDFPBKDF2CalibratesTheKeyslot pins the property at the level that
-// actually reaches the disk: the iteration count CreateKDF puts in the keyslot
-// is the calibrated one, not a constant.
-//
-// This is where issue #52 did its damage. BenchmarkPBKDF2 is exported and could
-// have been fixed while createPBKDF2KDF kept ignoring it; the header is what an
-// attacker gets, so the header is what this asserts.
+// TestCreateKDFPBKDF2CalibratesTheKeyslot: the count CreateKDF writes into the keyslot is the calibrated one.
 func TestCreateKDFPBKDF2CalibratesTheKeyslot(t *testing.T) {
 	defer parallel(t)()
 
@@ -542,16 +451,7 @@ func TestCreateKDFPBKDF2RejectsUnusableIterTime(t *testing.T) {
 	}
 }
 
-// TestAddKeyFormatOptionsPropagatesTheIterTime pins the contract that made
-// Codex's review finding a real one: an unusable PBKDFIterTime must reach the
-// calibration and be REFUSED, whichever API the caller came through.
-//
-// AddKey used to copy the budget only when it was > 0, so a negative arrived at
-// CreateKDF as zero and became the 2000ms default. That was invisible before
-// the calibration validated anything; once FormatOptions started refusing an
-// unusable budget, the same value errored on one path and was silently ignored
-// on the other. Two contracts for one parameter is the defect, not the
-// direction of the difference.
+// TestAddKeyFormatOptionsPropagatesTheIterTime: an unusable PBKDFIterTime is refused through every API.
 func TestAddKeyFormatOptionsPropagatesTheIterTime(t *testing.T) {
 	tests := []struct {
 		name string
@@ -595,7 +495,7 @@ func TestAddKeyFormatOptionsRefusesAnUnusableIterTime(t *testing.T) {
 func TestAddKeyFormatOptionsKeepsItsDefaults(t *testing.T) {
 	got := baseAddKeyFormatOptions(nil)
 
-	// The KDF is the mode's default (#237), and the hash is the one it names.
+	// The KDF is the mode's default, and the hash is the one it names.
 	wantKDF, wantHash := kdfTypeArgon2id, defaultHashAlgo
 	if fips140.Enabled() {
 		wantKDF, wantHash = kdfTypePBKDF2SHA512, "sha512"

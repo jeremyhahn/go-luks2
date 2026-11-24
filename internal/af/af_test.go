@@ -590,10 +590,7 @@ func TestSplitSingleStripe(t *testing.T) {
 	}
 }
 
-// TestSplitAndMergeReportAnUnsupportedHash pins errs.ErrUnsupportedHash on
-// the anti-forensic path, which has its own hash dispatch (#70). Both
-// directions are checked: a split and a merge reach writeHash separately,
-// and a fix applied to one of them would otherwise look complete.
+// TestSplitAndMergeReportAnUnsupportedHash pins errs.ErrUnsupportedHash on both the split and the merge path.
 func TestSplitAndMergeReportAnUnsupportedHash(t *testing.T) {
 	if _, err := afSplitPlain(t, make([]byte, 32), 4, "md5"); !errors.Is(err, errs.ErrUnsupportedHash) {
 		t.Fatalf("Split = %v, want an error wrapping errs.ErrUnsupportedHash", err)

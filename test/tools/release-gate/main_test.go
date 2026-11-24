@@ -21,8 +21,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/clock"
 )
 
-// ghCanceled is GitHub's own spelling of a canceled check run's conclusion,
-// and of Gitea's equivalent: the value the API returns, not prose.
+// ghCanceled is the API's conclusion value for a canceled check run.
 const ghCanceled = "cancelled" //nolint:misspell // the API's spelling, not prose
 
 const (
@@ -212,12 +211,10 @@ func TestGiteaGatePassedReleases(t *testing.T) {
 	}
 }
 
-// sigCtx is the push status the separate signatures.yml workflow (name
-// Signatures, job Signatures) reports on Gitea.
+// sigCtx is the push status signatures.yml (Signatures/Signatures) reports.
 const sigCtx = "Signatures / Signatures (push)"
 
-// Signatures runs in its own workflow, outside CI Gate, on every forge: a
-// Gitea release needs its push status too.
+// TestGiteaGateAndSignaturesPassed: a release needs the Signatures push status too.
 func TestGiteaGateAndSignaturesPassed(t *testing.T) {
 	f := &forge{answers: []func(http.ResponseWriter, *http.Request){
 		giteaJSON(2, gateCtx, "success", sigCtx, "success"),
@@ -596,10 +593,7 @@ func TestGitHubSignaturesMissingRefuses(t *testing.T) {
 	}
 }
 
-// No flag drops the Signatures requirement: on GitHub a -status-context that
-// names the Signatures status (which GitHub never reads) and on Gitea a
-// -workflow/-job-name naming signatures.yml (which Gitea never reads) still
-// leave CI Gate as the flagged gate, and Signatures is still required.
+// TestFlagsNamingSignaturesDoNotDropIt: no flag drops the Signatures requirement.
 func TestFlagsNamingSignaturesDoNotDropIt(t *testing.T) {
 	ghArgs := args("-status-context", sigCtx)
 	giteaArgs := args("-workflow", sigFile, "-job-name", sigJob)
@@ -653,11 +647,7 @@ func TestFlagsNamingSignaturesDoNotDropIt(t *testing.T) {
 	}
 }
 
-// Codex review round 2: a check run named "CI Gate" that passed is not
-// evidence. Here the pull_request run of the SAME commit passed (and has the
-// higher id), another commit's push run passed, and a run on another branch
-// passed -- but this commit's push to main failed its gate. That failure is
-// the answer.
+// TestGitHubGateIgnoresEveryRunButThisCommitsPushToMain: only this commit's push run to main decides.
 func TestGitHubGateIgnoresEveryRunButThisCommitsPushToMain(t *testing.T) {
 	passed := [][][3]string{{{gateJob, "completed", "success"}}}
 	g := &fakeGitHub{runs: []*ghRun{

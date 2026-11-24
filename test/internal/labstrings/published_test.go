@@ -11,11 +11,7 @@ import (
 	"testing"
 )
 
-// TestThePlantedUnpublishableFilesAreCaught proves the gate's second half can fail: one
-// of each kind this repository has actually carried, planted, and each one
-// must come back. Agent instructions are no longer among them -- they are
-// stripped at publish (#252), see TestScanUnpublishable_AgentFilesAreStrippedNotFailed
-// -- but a script or a workflow under an agent directory still fails.
+// TestThePlantedUnpublishableFilesAreCaught plants each unpublishable kind; a script or workflow under an agent directory still fails.
 func TestThePlantedUnpublishableFilesAreCaught(t *testing.T) {
 	planted := map[string]string{
 		".github/require-tool.sh":             "#!/bin/sh\nset -eu\n",
@@ -154,9 +150,7 @@ func TestReportUnpublishable_AWriteFailureIsATypedError(t *testing.T) {
 	}
 }
 
-// Only the named public workflows ship. The check is an allow-list, so an
-// alternate extension, a renamed factory workflow or a nested file under the
-// workflows directory fails as surely as the original name did.
+// Only the named public workflows ship; anything else under the workflows directory fails.
 func TestScanUnpublishable_OnlyThePublicWorkflowsShip(t *testing.T) {
 	rejected := []string{
 		".github/workflows/task-worker.yaml",
@@ -272,10 +266,7 @@ func TestStripAtPublish_ListsTheReviewWorkflows(t *testing.T) {
 	}
 }
 
-// Agent instructions are tracked on main and stripped at publish (owner
-// ruling 2026-10-04, #252): at the root or nested, they pass the scan and are
-// listed. Content checks still apply -- a script under .claude/ fails as a
-// script -- and lookalike names are ordinary files.
+// Agent instructions pass the scan and are listed as stripped at publish; content checks still apply.
 func TestScanUnpublishable_AgentFilesAreStrippedNotFailed(t *testing.T) {
 	agentFiles := []string{
 		"CLAUDE.md",
@@ -349,10 +340,7 @@ func TestDefaultStripAtPublish_IsUsableAndStripsNothingPublished(t *testing.T) {
 	}
 }
 
-// TestDefaultStripAtPublish_StripsTheInternalScansWorkflow: scans.yml runs
-// the internal scans on a workflow_dispatch of main only, so the public
-// release does not carry it; the strip list must name it, or the
-// releasability gate reports it as an unknown workflow (Codex P1, #490).
+// TestDefaultStripAtPublish_StripsTheInternalScansWorkflow: scans.yml is in the strip list.
 func TestDefaultStripAtPublish_StripsTheInternalScansWorkflow(t *testing.T) {
 	path := workflowDir + "scans.yml"
 	entries := entriesOf(map[string]string{path: "on: workflow_dispatch\n"})

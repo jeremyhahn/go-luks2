@@ -30,16 +30,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Activation's safety properties against the real kernel and cryptsetup
-// (#250), moved from pkg/luks2/activation_integration_test.go to
-// pkg/dmcrypt's own API (#274, #268): rollback, keyring release, readiness
-// and busy handling, and the mapping-name scope. The happy path (Activate /
-// Deactivate / Lookup round trip, the already-active refusal, the
-// not-active Lookup/Deactivate, the CheckKeyring preflight) is
-// pkg/dmcrypt/activate_integration_test.go's own, in-package suite; this
-// file covers what that one does not: adversarial real-kernel scenarios
-// that need the black-box fixtures (runVolume, cryptsetup) this tier's
-// sibling packages share.
+// Activation safety against the real kernel and cryptsetup: rollback, keyring release, readiness, busy handling and mapping-name scope.
 
 func activationImage(t *testing.T, name string, sizeMiB int, fill []byte) string {
 	t.Helper()
@@ -102,8 +93,7 @@ func deviceDigest(t *testing.T, device string, n int64) [32]byte {
 	return sum
 }
 
-// openAndUnlock opens device and derives its master key with passphrase,
-// the half of the old luks2.Unlock that stayed in pkg/luks2 (#268).
+// openAndUnlock opens device and derives its master key with passphrase.
 func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volume, *luks2.Key) {
 	t.Helper()
 
@@ -129,7 +119,7 @@ func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volum
 }
 
 // activateRecorded is dmcrypt.Activate with the mapping recorded in the run
-// ledger before it is created (#96, #348), so a run that dies at any point
+// ledger before it is created, so a run that dies at any point
 // after still leaves an entry a later run's reaper can remove. A record failure
 // refuses the activation; a mapping live under an identity other than the
 // recorded one is deactivated rather than left unattributable.
@@ -147,9 +137,7 @@ func activateRecorded(v *luks2.Volume, key *luks2.Key, name string) error {
 	return err
 }
 
-// mappedPath resolves name's mapping to its device-mapper path, the old
-// luks2.GetMappedDevicePath (#268), now pkg/dmcrypt.Lookup plus
-// Mapping.Path.
+// mappedPath resolves name's mapping to its device-mapper path through pkg/dmcrypt.Lookup.
 func mappedPath(t *testing.T, name string) (string, error) {
 	t.Helper()
 	m, err := dmcrypt.Lookup(context.Background(), name)

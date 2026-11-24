@@ -11,8 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// blkDiscard is the BLKDISCARD ioctl number for TRIM/discard on block
-// devices.
+// blkDiscard is the BLKDISCARD ioctl number.
 const blkDiscard = 0x1277
 
 // Discard issues BLKDISCARD for [0, size) of f, telling an SSD or a

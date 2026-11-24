@@ -13,7 +13,7 @@
 // "mkfs.ext4" decides what is written to that device. Resolving the name
 // through PATH let anyone who could influence the environment of a privileged
 // caller choose that binary, and the inherited environment carried whatever
-// else that caller had set -- LD_PRELOAD among it (#250, C7).
+// else that caller had set -- LD_PRELOAD among it.
 package command
 
 import (
@@ -111,10 +111,7 @@ func (t Tools) Resolve(name string) (*Program, error) {
 	return nil, &errs.Error{Kind: ErrTool, Detail: name + " was not found in any of " + strings.Join(t.Dirs, ", ")}
 }
 
-// ownedAndUnwritable reports an error unless path, with owner uid and mode, is
-// owned by root or the current user and is not writable by group or others. A
-// directory that is group- or world-writable passes only when stickyOK and its
-// sticky bit is set.
+// ownedAndUnwritable errors unless path is owned by root or the current user and not group- or world-writable (sticky directories allowed when stickyOK).
 func ownedAndUnwritable(path string, uid uint32, mode os.FileMode, stickyOK bool) error {
 	if uid != 0 && int64(uid) != int64(os.Geteuid()) {
 		return &errs.Error{Kind: ErrTool, Detail: path + " is owned by another user, so it could have been replaced"}
@@ -125,16 +122,7 @@ func ownedAndUnwritable(path string, uid uint32, mode os.FileMode, stickyOK bool
 	return nil
 }
 
-// command builds the command that runs prog with args: the checked file is
-// executed, argv[0] is the path it was found under -- mke2fs decides which
-// filesystem to make from it, so mkfs.ext4 must stay mkfs.ext4 -- and t.Env is
-// its entire environment.
-//
-// The program runs in its own process group (Setpgid), and a canceled ctx
-// kills that whole group rather than just the program named directly: mkfs.*,
-// fsck.* and zpool/zfs can each fork their own helpers, and a cancellation
-// that left those running would not be a cancellation. WaitDelay bounds how
-// long Wait gives the group to actually exit after that kill.
+// command runs the checked file as argv[0] = its found path, in its own process group that a canceled ctx kills whole, with t.Env as its environment.
 func (t Tools) command(ctx context.Context, prog *Program, args ...string) *exec.Cmd {
 	cmd := prog.Cmd(ctx, args...)
 	cmd.Env = t.Env
@@ -145,9 +133,7 @@ func (t Tools) command(ctx context.Context, prog *Program, args ...string) *exec
 	}
 	cmd.Cancel = func() error {
 		pgid := cmd.Process.Pid
-		// os/exec's own kill when WaitDelay expires reaches only the leader,
-		// so the group's SIGKILL is scheduled here, for the same moment: a
-		// helper that ignores SIGTERM must not outlive the cancellation.
+		// Kill the whole group when WaitDelay expires, since os/exec's kill reaches only the leader.
 		time.AfterFunc(grace, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 		return syscall.Kill(-pgid, syscall.SIGTERM)
 	}

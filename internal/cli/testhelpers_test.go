@@ -38,9 +38,7 @@ func newTestVolumeImage(t *testing.T, name string) string {
 	return testVolume.copyTo(t, name)
 }
 
-// fipsProcess reports whether this test binary runs in FIPS 140-3 mode (the
-// full tier's FIPS job runs it under GODEBUG=fips140=only). FIPS mode is fixed at
-// process start, and the library refuses Argon2 in it.
+// fipsProcess reports whether this test binary runs in FIPS 140-3 mode, fixed at process start.
 var fipsProcess = bool(fips.Probe())
 
 // fastTestKDF is the cheapest KDF the library will write in this process:

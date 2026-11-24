@@ -218,12 +218,7 @@ func volumeMethodCalls(t *testing.T) []struct {
 	}
 }
 
-// TestEveryVolumeMethodHonoursErrClosedAndErrReadOnly pins volumes/
-// engineering.md's two handle sentinels for every method, not a sample: after
-// Close every method but Path and Close returns an *Error whose Kind is
-// ErrClosed and whose Op names the method; Close is idempotent; on a
-// WithReadOnly handle every write method returns ErrReadOnly; a closed
-// read-only handle reports ErrClosed first; and no refusal touches the device.
+// TestEveryVolumeMethodHonoursErrClosedAndErrReadOnly checks every method's ErrClosed and ErrReadOnly refusal, without touching the device.
 func TestEveryVolumeMethodHonoursErrClosedAndErrReadOnly(t *testing.T) {
 	ctx := context.Background()
 	path := formattedVolumeImage(t, "sentinels.img", "", "")

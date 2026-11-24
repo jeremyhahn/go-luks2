@@ -15,22 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TestSystemRemoverRefusesADeviceItCouldNotIdentify tests the REAL remover, not
-// the fake, and that distinction is the point.
-//
-// Every other test of this behavior in this package drives fakeRemover. A fake
-// that refuses proves the fake refuses. The finding on 974bf2de was against
-// SystemRemover.DetachLoop specifically -- it reached LOOP_CLR_FD on a device it
-// had just declared it could not identify -- so the guard has to be asserted
-// against the code that issues the ioctl.
-//
-// It needs no privilege and no loop device, because of WHERE the refusal sits:
-// before the open. The device path below does not exist, and that is the
-// assertion. If the refusal were moved after the open -- the natural place to
-// put it, and where the previous version's equivalent check lived -- this test
-// would report "no such file or directory" instead, and fail. So it pins the
-// ORDER, which is the property that makes the guard unconditional rather than
-// dependent on the device still being there.
+// TestSystemRemoverRefusesADeviceItCouldNotIdentify: the real remover refuses before opening the device.
 func TestSystemRemoverRefusesADeviceItCouldNotIdentify(t *testing.T) {
 	capture := errors.New("input/output error")
 
@@ -55,13 +40,7 @@ func TestSystemRemoverRefusesADeviceItCouldNotIdentify(t *testing.T) {
 	}
 }
 
-// TestSystemRemoverRefusesADeviceCarryingNoIdentityAtAll covers the same branch
-// reached with no reason attached.
-//
-// IdentityKnown false with a nil IdentityErr is not a state the enumeration
-// produces -- but it IS the zero value of LoopDevice, so it is what any future
-// caller that builds one by hand will hand over. The dangerous version of this
-// code is the one where a zero-valued device is the permissive case.
+// TestSystemRemoverRefusesADeviceCarryingNoIdentityAtAll: a zero LoopDevice is refused.
 func TestSystemRemoverRefusesADeviceCarryingNoIdentityAtAll(t *testing.T) {
 	err := SystemRemover{}.DetachLoop(LoopDevice{Path: "/dev/loop-does-not-exist"})
 	if err == nil {
@@ -101,15 +80,12 @@ func sysfsTree(t *testing.T, entries map[string]string) string {
 	return root
 }
 
-// TestWaitForLoopReleaseAcceptsADeviceThatIsGone is the ordinary path: the
-// deferred release completed, the device no longer backs the file.
+// TestWaitForLoopReleaseAcceptsADeviceThatIsGone: a completed release passes.
 func TestWaitForLoopReleaseAcceptsADeviceThatIsGone(t *testing.T) {
 	root := sysfsTree(t, map[string]string{"loop1": "/tmp/other.img"})
 	dev := LoopDevice{Path: "/dev/loop0", Backing: "/tmp/ours.img", Identity: fakeIdentityOf("/tmp/ours.img"), IdentityKnown: true}
 
-	// Same capturer as the still-bound case, so this test differs from it ONLY
-	// in whether the device is present for this backing file -- otherwise
-	// "released" could be an artifact of an identity that never matches.
+	// Same capturer as the still-bound case, so only presence differs.
 	ours := func(string) (loopIdentity, bool, error) {
 		return fakeIdentityOf("/tmp/ours.img"), true, nil
 	}
@@ -118,20 +94,12 @@ func TestWaitForLoopReleaseAcceptsADeviceThatIsGone(t *testing.T) {
 	}
 }
 
-// TestWaitForLoopReleaseRefusesADeviceStillBound is the case the whole change
-// exists for, and it is the one the old code could not express: LOOP_CLR_FD
-// reported success, the release was DEFERRED because something still held the
-// device open, and the device still backs the file. Reporting that as success
-// is what made TestDetachLoopClearsTheDeviceItEnumerated fail intermittently
-// in the integration tier -- the caller was racing a promise it could not see.
+// TestWaitForLoopReleaseRefusesADeviceStillBound: a deferred release still backing the file is an error.
 func TestWaitForLoopReleaseRefusesADeviceStillBound(t *testing.T) {
 	root := sysfsTree(t, map[string]string{"loop0": "/tmp/ours.img"})
 	dev := LoopDevice{Path: "/dev/loop0", Backing: "/tmp/ours.img", Identity: fakeIdentityOf("/tmp/ours.img"), IdentityKnown: true}
 
-	// The capturer must report OUR identity, or the device reads as a reused
-	// number and the wait returns nil for the wrong reason. stubBoundIdentity
-	// hashes the DEVICE path, not the backing file, so it never matches -- and
-	// this test passed vacuously against it before that was noticed.
+	// The capturer must report our identity, or the device reads as reused.
 	ours := func(string) (loopIdentity, bool, error) {
 		return fakeIdentityOf("/tmp/ours.img"), true, nil
 	}
@@ -149,19 +117,13 @@ func TestWaitForLoopReleaseRefusesADeviceStillBound(t *testing.T) {
 	if !strings.Contains(err.Error(), "deferred") {
 		t.Errorf("error %q does not say the release was deferred, which is the whole diagnosis", err)
 	}
-	// A bound that is not honored is an unbounded wait wearing a timeout. On a
-	// controlled clock (#233) it is exact: past the budget by at most a poll.
+	// On a controlled clock the bound is exact: past the budget by at most a poll.
 	if waited := clk.Elapsed(); waited <= budget || waited > budget+poll {
 		t.Errorf("waited %s against a %s budget polled every %s", waited, budget, poll)
 	}
 }
 
-// TestWaitForLoopReleaseAcceptsAReusedLoopNumber keeps the third answer
-// distinct. The loop number being present is not the question -- the number is
-// host-global and reusable, so a device bound to a DIFFERENT identity means
-// ours was released and the number handed to someone else. Treating that as
-// "still held" would make a successful detach fail whenever the host was busy,
-// which is exactly when the suite runs.
+// TestWaitForLoopReleaseAcceptsAReusedLoopNumber: a device now bound to another identity means ours was released.
 func TestWaitForLoopReleaseAcceptsAReusedLoopNumber(t *testing.T) {
 	// Same path, same backing string, but the capturer reports the identity of
 	// a different file -- the shape of a number freed and reassigned.
@@ -285,7 +247,7 @@ func withSysfsAnswer(t *testing.T, path string, err error) {
 
 // TestReadBackingFileTreatsEveryReleasedAnswerAsAbsent pins the kernel
 // answers that mean "bound to nothing" -- ENOENT, and the ENODEV the CI
-// runner's kernel gives for a detached device (#141, run 22538) -- against the
+// runner's kernel gives for a detached device (run 22538) -- against the
 // ones that mean "could not tell", which must stay errors.
 func TestReadBackingFileTreatsEveryReleasedAnswerAsAbsent(t *testing.T) {
 	root := sysfsTree(t, map[string]string{"loop1": "/tmp/ours.img"})

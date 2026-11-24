@@ -84,10 +84,7 @@ func ReadCurrentHeader(device io.ReaderAt) (*CurrentHeader, error) {
 	}
 }
 
-// probeSecondaryHeader tries every legal header area size for the secondary
-// copy, as cryptsetup does (hdr2_offset) when the primary cannot say where it
-// is. A candidate is accepted only when it passes every check
-// ReadHeaderCopyFrom makes; the error is the first candidate's.
+// probeSecondaryHeader tries every legal area size for the secondary copy, accepting only a fully valid one.
 func probeSecondaryHeader(device io.ReaderAt) (*BinaryHeader, *Metadata, int64, error) {
 	var firstErr error
 	for _, offset := range LegalHeaderAreaSizes() {

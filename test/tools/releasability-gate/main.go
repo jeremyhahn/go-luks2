@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command releasability-gate is the public-releasability gate (#211). It reads
+// Command releasability-gate is the public-releasability gate. It reads
 // every entry in the git index of the checkout it is given -- the staged
 // content, not the working tree, because the index is what the next commit
 // carries -- and fails on a fleet address, hostname or owner path in any of
@@ -86,12 +86,7 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		return exitFailed
 	}
 
-	// The pattern set names the fleet's values, so it is compiled in from a
-	// file stripped at publish. A tree that tracks strip-at-publish files is
-	// a development tree and must carry it: Scan refuses an empty set. Only
-	// an archive export -- which by construction carries no strip-at-publish
-	// file -- runs without one, and then says on every run that it did not
-	// scan content.
+	// The fleet pattern set comes from a strip-at-publish file; only an archive export runs without it, and says so.
 	scanContent := len(p.patterns) > 0 || len(labstrings.StripAtPublish(entries, p.strip)) > 0
 	var findings []labstrings.Finding
 	if scanContent {
@@ -132,12 +127,7 @@ func run(args []string, read indexReader, p policy, stdout, stderr io.Writer) in
 		}
 	}
 
-	// Strip-at-publish files do not fail the gate: they belong on main, and
-	// every one reaching this point is export-ignored (NotExportIgnored above
-	// fails the rest), so an archive export of the tree -- which is how the
-	// public tree is produced (#211) -- leaves it out. Each is printed on every
-	// run. A report that cannot be written is a failure -- the qualification
-	// is the point.
+	// Strip-at-publish files pass and are listed on every run; a report that cannot be written fails.
 	if stripped := labstrings.StripAtPublish(entries, p.strip); len(stripped) > 0 {
 		header := fmt.Sprintf("releasability-gate: %d tracked files; no finding, publishable as an archive export -- %d file(s) excluded from every archive by %s (export-ignore):\n\n", len(entries), len(stripped), labstrings.GitAttributes)
 		if err := writeItems(stdout, header, stripped); err != nil {

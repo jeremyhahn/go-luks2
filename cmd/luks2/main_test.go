@@ -17,12 +17,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/cli"
 )
 
-// cliChildEnv names the variable that turns this test binary, re-executed by
-// inCLIChild, into the child that runs one test against the real CLI. cli.Run
-// hardens the process it runs in, and RLIMIT_CORE 0/0 is permanent for an
-// unprivileged process: run in the test binary itself, the real CLI would
-// leave TestRunHardensBeforeFirstSecret unable to start its probe from a
-// process that would dump core, on a second -count or in a shuffled order.
+// cliChildEnv makes this re-executed test binary the child that runs one test against the real, process-hardening CLI.
 const cliChildEnv = "LUKS2_CLI_CHILD"
 
 // cliChildDone marks, on the child's output, that the selected test ran to

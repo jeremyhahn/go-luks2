@@ -25,15 +25,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// No keyslot or digest is created with a SHA-1 KDF (#239, BREAKING).
-//
-// #236 stopped this package writing SHA-1 anti-forensic splits; this closes
-// the other half of a keyslot. Every creation path refuses a PBKDF2-SHA1 KDF
-// with ErrInvalidArgument before it derives or writes anything, ChangeKey
-// rewrites an existing PBKDF2-SHA1 keyslot as PBKDF2-SHA256, and existing
-// SHA-1 keyslots still open outside FIPS mode (sha1af_test.go opens a
-// cryptsetup-converted LUKS1 volume, whose keyslot is PBKDF2-SHA1, to
-// cryptsetup's volume key).
+// No keyslot or digest is created with a SHA-1 KDF; ChangeKey rewrites PBKDF2-SHA1 as PBKDF2-SHA256, and SHA-1 keyslots still open outside FIPS mode.
 
 // countDerivations counts keyslot-key derivations for the rest of the test.
 // The unlock derives before it reads anything, so zero derivations means no
@@ -157,12 +149,7 @@ func TestRefuseSHA1ForCreation(t *testing.T) {
 	}
 }
 
-// TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256: ChangeKey on the keyslot of
-// a cryptsetup-converted LUKS1 volume -- PBKDF2-SHA1 at cryptsetup's floor of
-// 1000 iterations -- leaves a PBKDF2-SHA256 keyslot with a SHA-256 split at no
-// fewer iterations than it had, raised to this package's SHA-256 floor. The
-// new passphrase opens it in cryptsetup to the same volume key, and the old
-// one no longer does.
+// TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256: the result opens in cryptsetup to the same volume key at no fewer iterations.
 func TestChangeKeyRewritesAPBKDF2SHA1KeyslotAsSHA256(t *testing.T) {
 	defer parallel(t)()
 	image := sha1AFVolume(t, sha1AFKinds[1])
@@ -244,11 +231,7 @@ func cryptsetupVolumeKeyWith(t *testing.T, image, passphrase string) string {
 	return hex.EncodeToString(key)
 }
 
-// modelPBKDF2Cost replaces the timer the SHA-1 conversion measures with: a
-// derivation costs iterations x output blocks x the per-HMAC cost the model
-// gives for that hash on that call (in microseconds), so tests decide what
-// the "machine" measures instead of depending on the wall clock (#234). The
-// call index lets a model vary between samples, as a noisy machine does.
+// modelPBKDF2Cost replaces the conversion timer with a model: iterations x output blocks x per-HMAC cost for the call index.
 func modelPBKDF2Cost(t *testing.T, sha1Cost, sha256Cost func(call int) float64) volumeSys {
 	t.Helper()
 

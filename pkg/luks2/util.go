@@ -18,11 +18,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// custody is where this package's key material is allocated and released:
-// secret.System, every enclave admitted through go-enclave's process
-// Allocator. It is a variable only so the fail-closed tests can stand in a
-// custody that refuses, or one that measures; nothing in the package changes
-// it.
+// custody is where this package's key material is allocated and released; a variable only for fail-closed tests.
 var custody = secret.System()
 
 // afCodec is the anti-forensic codec this package splits and merges with: its
@@ -93,14 +89,7 @@ func isPowerOf2(n int) bool {
 // number, so the two fill loops cannot drift apart.
 const randomFillChunk = keyslotWipeChunk
 
-// writeRandom writes size bytes of CSPRNG output at the file's current
-// position, in fixed-size chunks.
-//
-// It is the counterpart of zeroRange (wipe.go) and exists for the same reason that one
-// chunks: size is derived from a header, and a single make([]byte, size) hands
-// an attacker-influenced number to the allocator. Here the argument is stronger
-// still -- the largest caller fills the whole unallocated keyslots region, ~16
-// MiB on a default container, which is not an allocation worth making at once.
+// writeRandom writes size bytes of CSPRNG output at the file's current position in fixed-size chunks, like zeroRange.
 func writeRandom(ctx context.Context, f *os.File, size int64, cryptoRand io.Reader) error {
 	if size <= 0 {
 		return nil

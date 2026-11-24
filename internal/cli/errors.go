@@ -44,10 +44,7 @@ var ErrEmptyCredential = errors.New("cli: empty credential")
 // effect.
 var errHardeningIncomplete = errors.New("cli: process hardening reported a protection not in effect")
 
-// errNotLUKSDevice is isluks's negative answer. It deliberately matches no
-// exitTable sentinel, because isluks's exit code is its own 0/1 contract
-// (0 is a LUKS device, 1 is not, as cryptsetup isLuks), not the generic error-to-exit-code mapping every other
-// command uses.
+// errNotLUKSDevice is isluks's negative answer; it matches no exitTable sentinel because isluks exits 0 or 1 like cryptsetup isLuks.
 var errNotLUKSDevice = errors.New("cli: not a LUKS device")
 
 // UsageError reports that a subcommand's arguments could not be parsed, or

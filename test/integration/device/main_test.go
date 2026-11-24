@@ -22,11 +22,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/test/internal/harness"
 )
 
-// Unlock, Lock, IsUnlocked and GetMappedDevicePath are the old
-// luks2.Unlock/Lock/IsUnlocked/GetMappedDevicePath free functions, forwarded
-// across the two packages they collapsed into (#268): pkg/luks2 derives the
-// key and pkg/dmcrypt activates it. See cmd/luks2/cli.go's
-// DefaultLuksOperations for the same forward.
+// Unlock, Lock, IsUnlocked and GetMappedDevicePath combine pkg/luks2 key derivation with pkg/dmcrypt activation.
 func Unlock(device string, passphrase []byte, name string) error {
 	ctx := context.Background()
 	v, err := luks2.Open(ctx, device)
@@ -47,12 +43,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 	}
 	defer key.Destroy()
 
-	// Write-ahead (#96, #348): the mapping is in the run ledger before
-	// Activate creates it, so a run that dies at any point after -- a
-	// timeout, a kill, a container torn down mid-test -- leaves an entry a
-	// later run's reaper can attribute and remove. A record failure refuses
-	// the activation. A live mapping that does not carry its recorded
-	// identity is removed here, because the reaper would leave it.
+	// Record the mapping in the run ledger before Activate creates it; a record failure refuses activation, and a live mapping without its recorded identity is removed.
 	var mapping *dmcrypt.Mapping
 	err = runSuite.Ledger.ActivateRecordedAhead(runSuite.Remover, device, name, func() error {
 		var err error

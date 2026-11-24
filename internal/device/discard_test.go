@@ -28,8 +28,7 @@ func TestDiscardRefusesANonPositiveSize(t *testing.T) {
 	}
 }
 
-// TestDiscardOnARegularFile: BLKDISCARD is a block-device ioctl, so a regular
-// file reports the failure as a *Error rather than a silent success.
+// TestDiscardOnARegularFile: BLKDISCARD on a regular file is a *Error, not a silent success.
 func TestDiscardOnARegularFile(t *testing.T) {
 	f, err := os.CreateTemp("", "luks-device-discard-*")
 	if err != nil {

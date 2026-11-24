@@ -26,17 +26,7 @@ func (v *Volume) keyslotDeviceFor(locked *device.Locked) (*keyslotDevice, error)
 	return pinnedKeyslotDevice(&deviceLock{locked: locked}, v.path, v.sys)
 }
 
-// onDiskPriority converts p to the *int addKeyslotWithMasterKeyAndPriority
-// and ChangeKeyslot write, the inverse of priorityFromDisk: nil (no member)
-// for PriorityDefault and PriorityNormal, matching the on-disk convention
-// that an absent priority means normal and cryptsetup's own omission of it;
-// int(p)-1 for everything else, so PriorityIgnore writes 0 and
-// PriorityPrefer writes 2. It is the single rule every priority-writing path
-// (AddKeyslot, ChangeKeyslot, Enroll, AddRecoveryKey) applies.
-//
-// An undeclared Priority maps outside 0..2 and is refused by
-// addKeyslotWithMasterKeyAndPriority (and by ChangeKeyslot before it writes),
-// never written.
+// onDiskPriority converts p to the on-disk *int: nil for PriorityDefault and PriorityNormal, int(p)-1 otherwise; an undeclared Priority is refused by the writers.
 func onDiskPriority(p Priority) *int {
 	if p == PriorityDefault || p == PriorityNormal {
 		return nil
@@ -45,12 +35,7 @@ func onDiskPriority(p Priority) *int {
 	return &v
 }
 
-// cloneKeyEnclave borrows key's bytes into a NEW enclave this call owns --
-// the same pattern (*Volume).UnlockWithVolumeKey uses to hand back an
-// independently destroyable copy. addKeyslotWithMasterKeyAndPriority and
-// changeKeyslotCore need an enclave.ByteAccess of their own; key's bytes
-// are reachable only through volkey.Borrow's window, never as a value this
-// package can hold past it.
+// cloneKeyEnclave borrows key's bytes into a new enclave this call owns.
 func cloneKeyEnclave(op string, v *Volume, key *Key) (enclave.ByteAccess, error) {
 	var cloned enclave.ByteAccess
 	err := volkey.Borrow(op, key, func(b []byte) error {
@@ -277,16 +262,7 @@ func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error {
 		return errAt(op, v.path, err)
 	}
 
-	// Claimed EXCLUSIVELY (#246 D4): RemoveKeyslot takes no credential, so
-	// this claim is the only thing standing between a volume that is open,
-	// or a device something else holds, and a keyslot being destroyed out
-	// from under it. The claim reopens the locked descriptor's own
-	// /proc/self/fd entry (device.Locked.Claim), the same way Format and
-	// Erase already claim theirs, so a path retargeted after the lock was
-	// taken cannot move the claim to a different device than the one this
-	// removal is proven against. Nothing below writes through claimed: the
-	// write still goes through dev's own locked descriptor, exactly as
-	// Format and Erase do.
+	// Claim the device exclusively through the locked descriptor, since no credential guards removal; writes still go through dev.
 	claimed, err := locked.Claim(ctx, "remove the keyslot", os.O_RDWR|os.O_EXCL, v.sys.openFile)
 	if err != nil {
 		return errAt(op, v.path, err)

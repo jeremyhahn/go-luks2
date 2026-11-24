@@ -19,37 +19,9 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// A crypt segment's declared fields are handed to a KERNEL IOCTL, and until
-// #40 nothing checked any of them.
-//
-// The three that reach devmapper.CryptTable are sector_size, iv_tweak and
-// encryption. Measured on main before this file existed, with a segment
-// declaring sector_size -1 and iv_tweak "not-a-number":
-//
-//	ReadHeader ACCEPTED it
-//	SectorSize handed to the dm-crypt table: 18446744073709551615
-//	IVTweak    handed to the dm-crypt table: 0 (from "not-a-number")
-//
-// The sector size carried a G115 suppression annotation justified as "sector
-// size is validated (512 or 4096)". That validation exists in exactly one
-// place -- validateFormatOptionsForTest, on the FORMAT path -- and has never applied
-// to a segment read off a device, so a gosec finding was silenced by a
-// justification that was not true of the code it annotated. (Paraphrased
-// rather than quoted for the same reason as kdf.go's u32 comment: gosec finds
-// its directive by literal text, in any comment.)
-//
-// The fix is the segment counterpart of header.ValidateKeyslot: ONE validator at the
-// read boundary that every consumer inherits, rather than a check per call
-// site. These tests drive it through ReadHeader and through the real Unlock
-// path, because a validator nothing calls is the defect it was written to fix.
+// Crypt segment fields reach a dm-crypt ioctl, so one validator at the read boundary checks sector_size, iv_tweak and encryption; tested through ReadHeader and Unlock.
 
-// craftedSegmentVolume writes a container whose crypt segment has been mutated
-// by mutate, and returns its path.
-//
-// It formats for real and rewrites the header through writeHeaderInternal, so
-// the container is byte-identical to a legitimate one apart from the field
-// under test -- the checksums are recomputed and the JSON is well-formed. A
-// hand-assembled image would prove only that a broken image is rejected.
+// craftedSegmentVolume formats a container, mutates its crypt segment through writeHeaderInternal, and returns its path.
 func craftedSegmentVolume(t *testing.T, name string, mutate func(*header.Segment)) string {
 	t.Helper()
 
@@ -73,12 +45,7 @@ func craftedSegmentVolume(t *testing.T, name string, mutate func(*header.Segment
 	return path
 }
 
-// TestReadHeaderRefusesASegmentTheKernelMustNotSee is the boundary itself.
-//
-// Every case is a value that reached a device-mapper ioctl unchecked before
-// #40. They are volume-level faults and not per-keyslot ones -- a segment is
-// the whole volume's data, and there is no second segment to fall back on the
-// way a damaged keyslot has 31 siblings -- so each is ErrInvalidHeader.
+// TestReadHeaderRefusesASegmentTheKernelMustNotSee: each bad segment is ErrInvalidHeader.
 func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 	defer parallel(t)()
 
@@ -143,11 +110,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 			names:  "cipher",
 		},
 		{
-			// A SPACE AND NOTHING ELSE. The realistic payload below carries "/"
-			// as well, which is separately outside the charset -- so a fixture
-			// built from it passes even with the space admitted, and proves
-			// nothing about the separator. Measured: admitting " " to the
-			// whitelist left the full-payload case green.
+			// A space alone, so the separator is tested without "/" also being present.
 			name:   "encryption carrying a space and no other rejected byte",
 			mutate: func(s *header.Segment) { s.Encryption = "aes-xts-plain64 plain64" },
 			names:  "cipher",
@@ -185,8 +148,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 			if !errors.Is(err, ErrInvalidHeader) {
 				t.Fatalf("ReadHeader = %v, want an error wrapping ErrInvalidHeader", err)
 			}
-			// An operator has to be told WHICH field, or the guard is a
-			// refusal with no remedy.
+			// The error must name the field.
 			if !strings.Contains(err.Error(), tt.names) {
 				t.Fatalf("the refusal does not name %q: %v", tt.names, err)
 			}
@@ -194,15 +156,7 @@ func TestReadHeaderRefusesASegmentTheKernelMustNotSee(t *testing.T) {
 	}
 }
 
-// TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites is the other half, and
-// it is the half that stops the guard becoming its own defect.
-//
-// cryptsetup 2.7.0 accepts --sector-size 512, 1024, 2048 and 4096 and refuses
-// 256 and 8192 (measured; each accepted value was read back out of the header
-// it wrote). This package's own writer emits only 512 or 4096, so validating
-// the READ path against the writer's range would refuse two containers
-// cryptsetup can create -- exactly the failure internal/header/keyslot.go's measured
-// limits exist to avoid.
+// TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites: 512, 1024, 2048 and 4096 are accepted on read.
 func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 	defer parallel(t)()
 
@@ -223,17 +177,7 @@ func TestReadHeaderAcceptsEverySectorSizeCryptsetupWrites(t *testing.T) {
 	}
 }
 
-// TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites pins the charset
-// against cipher specifications this package does not write, so the whitelist
-// cannot quietly narrow to our own writer's output.
-//
-// "aes-xts-plain64" and "aes-cbc-essiv:sha256" were formatted with cryptsetup
-// 2.7.0 and read back out of the header it wrote. The capi form was NOT
-// measured -- cryptsetup probes the kernel crypto API for it and demands a real
-// loop device, so it cannot be formatted unprivileged against a file -- and is
-// here from the grammar in cryptsetup(8). It is also the longest spelling the
-// format can express, which is what header.MaxSegmentEncryptionLength is sized
-// against.
+// TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites pins the charset against cryptsetup spellings, including the capi form from cryptsetup(8).
 func TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites(t *testing.T) {
 	defer parallel(t)()
 
@@ -254,19 +198,7 @@ func TestReadHeaderAcceptsTheCipherSpellingsCryptsetupWrites(t *testing.T) {
 	}
 }
 
-// TestACraftedSegmentNeverReachesTheDeviceMapper is the assertion that
-// matters: not merely that SOME call returns an error, but that the
-// crafted value never got as far as the values pkg/dmcrypt.Activate would
-// hand the ioctl.
-//
-// Before #40 this failed on the table contents, not on the error: the old
-// Unlock ran to completion and handed device-mapper SectorSize
-// 18446744073709551615, which devmapper renders with
-// strconv.Itoa(int(...)) into the target flag "sector_size:-1". The
-// current header reader refuses all four crafted shapes structurally, at
-// Open/Unlock's shared read, so Unlock itself is the refusal now rather
-// than a later table-building step; either way, nothing downstream of the
-// header ever sees these values.
+// TestACraftedSegmentNeverReachesTheDeviceMapper: Unlock refuses the crafted segments before any table is built.
 func TestACraftedSegmentNeverReachesTheDeviceMapper(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -305,12 +237,7 @@ func TestACraftedSegmentNeverReachesTheDeviceMapper(t *testing.T) {
 	}
 }
 
-// TestTheDeviceMapperTableCarriesTheDeclaredSectorSize is the control that
-// keeps the test above honest: Target of an UNMODIFIED container still
-// succeeds, and reports the values the header declares.
-//
-// Without it, "Target refused it" would pass just as well for a fix that
-// broke every activation.
+// TestTheDeviceMapperTableCarriesTheDeclaredSectorSize is the control: Target of an unmodified container reports the declared values.
 func TestTheDeviceMapperTableCarriesTheDeclaredSectorSize(t *testing.T) {
 	device, passphrase := unlockableVolume(t)
 

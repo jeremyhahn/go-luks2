@@ -36,12 +36,7 @@ func openSecret(t *testing.T, e enclave.ByteAccess) []byte {
 	return out
 }
 
-// mustDestroy destroys e now and fails the test if go-enclave reports the
-// release as anything but clean. Every test-side Destroy goes through it, for
-// the reason destroyOnCleanup gives: on a healthy host every release is clean,
-// so a report means the suite ran somewhere that refuses part of the teardown
-// contract, and that is worth a red test rather than a silent drop. It uses
-// Errorf, not Fatalf, so it is safe from a deferred call and from a goroutine.
+// mustDestroy destroys e and fails the test (Errorf) unless the release is clean.
 func mustDestroy(tb testing.TB, e enclave.ByteAccess) {
 	tb.Helper()
 	if err := e.Destroy(); err != nil {
@@ -59,13 +54,7 @@ func destroyOnCleanup(t *testing.T, e enclave.ByteAccess) {
 	t.Cleanup(func() { mustDestroy(t, e) })
 }
 
-// lockedKiB reports the process's currently mlock'd memory, in kibibytes, from
-// /proc/self/status.
-//
-// It is how the custody tests below assert that locked pages are RELEASED and
-// not merely dropped: a leak of enclave regions is invisible to any assertion
-// about return values, because the leaked handle is exactly the one nobody
-// holds any more.
+// lockedKiB reports the process's mlock'd memory in KiB from /proc/self/status.
 func lockedKiB(t *testing.T) int {
 	t.Helper()
 
@@ -305,11 +294,7 @@ func TestCloneRefusesEmptyMaterial(t *testing.T) {
 	}
 }
 
-// CloneWritable exists for one reason: the copy is normalised IN PLACE.
-// The enclaves go-enclave builds from existing material are frozen read-only
-// and a write through them faults the process, so the writable variant has to
-// keep handing back pages a borrow may write to. This is the property
-// recoverykey.Decode depends on when it lower-cases a candidate body.
+// CloneWritable hands back pages a borrow may write, which recoverykey.Decode needs.
 func TestCloneWritableHandsBackPagesABorrowMayWrite(t *testing.T) {
 	source := []byte("ABCDEF0123")
 
@@ -379,10 +364,7 @@ func TestBorrowWindowClosesWhenTheBorrowReturns(t *testing.T) {
 		t.Fatalf("Random failed: %v", err)
 	}
 
-	// Destroy takes the write lock and therefore BLOCKS until every in-flight
-	// borrow has returned. If a borrow window were still open here, this would
-	// deadlock rather than complete -- which is what makes the completion
-	// itself the assertion.
+	// Destroy blocks until every borrow returns, so completing is the assertion.
 	if err := Borrow("test", e, func(b []byte) error {
 		if len(b) != 32 {
 			t.Errorf("borrow saw %d bytes, want 32", len(b))
@@ -428,14 +410,7 @@ func TestLockedMemoryIsReleasedByRelease(t *testing.T) {
 		system.Release(e)
 	}
 
-	// Sixteen 64 KiB regions is a megabyte of locked memory. If Destroy were
-	// dropping the handle without unmapping, VmLck would carry all of it.
-	//
-	// The slack is one page rather than a fraction of the total, because
-	// release here is EXPLICIT -- no finalizer, no collector -- so VmLck comes
-	// back to exactly where it started, and a leak of even one region would be
-	// 64 KiB. A generous tolerance would let single leaks through, which is
-	// precisely what this is looking for.
+	// Sixteen 64 KiB regions; VmLck must return to within one page of the start.
 	if after := lockedKiB(t); after > before+lockedSlackKiB {
 		t.Fatalf("locked memory grew from %d KiB to %d KiB across %d allocate/destroy rounds", before, after, rounds)
 	}
@@ -523,10 +498,7 @@ func TestReleaseReleasesPastAReport(t *testing.T) {
 	requireReleased(t, "second", second)
 }
 
-// TestReleaseDropsCorruptionReportAndKeepsReleasing pins the other half of the
-// decision: Destroy reports detected corruption as enclave.ErrEnclaveCorrupted
-// (it no longer panics), after wiping, and the next WipeAll reports it again.
-// Release drops the report like any other and still releases what follows.
+// TestReleaseDropsCorruptionReportAndKeepsReleasing: Release drops ErrEnclaveCorrupted and still releases what follows.
 func TestReleaseDropsCorruptionReportAndKeepsReleasing(t *testing.T) {
 	first, err := enclave.NewMemoryCopy([]byte("volume key material"))
 	if err != nil {
