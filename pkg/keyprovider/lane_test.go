@@ -84,7 +84,7 @@ func TestCommandGivesTheHelperAMinimalEnvironment(t *testing.T) {
 	}
 }
 
-// lingeringHelper writes a helper whose grandchild holds its stdout and stderr for a few seconds, signalling on the returned FIFO.
+// lingeringHelper writes a helper whose grandchild holds its stdout and stderr for a few seconds, signaling on the returned FIFO.
 func lingeringHelper(t *testing.T, seconds int, block bool) (path, fifo string) {
 	t.Helper()
 	dir := privateDir(t)

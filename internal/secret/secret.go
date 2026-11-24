@@ -152,7 +152,7 @@ func (c Custody) Clone(op string, b []byte) (enclave.ByteAccess, error) {
 	return e, nil
 }
 
-// CloneWritable is Clone with writable pages, for short-lived scratch normalised in place.
+// CloneWritable is Clone with writable pages, for short-lived scratch normalized in place.
 func (c Custody) CloneWritable(op string, b []byte) (enclave.ByteAccess, error) {
 	return c.CloneFiltered(op, b, func(byte) bool { return true })
 }
