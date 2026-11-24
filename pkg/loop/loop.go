@@ -4,7 +4,11 @@
 
 //go:build linux
 
-// Package loop attaches and detaches Linux loop devices and finds the one backing a file; root only.
+// Package loop attaches and detaches Linux loop devices and finds the one
+// backing a given file. It is root-only: LOOP_SET_FD and LOOP_CLR_FD require
+// CAP_SYS_ADMIN (or, with LOOP_SET_FD, ownership-equivalent privilege on most
+// kernels), and /sys/block is readable but the device nodes under /dev
+// generally are not, to an unprivileged caller.
 package loop
 
 import (

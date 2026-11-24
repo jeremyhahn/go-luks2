@@ -2,7 +2,43 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command release-gate refuses a release unless the tagged commit is on main and both CI Gate and Signatures passed for it on push, waiting for their results; the token comes from FORGE_TOKEN.
+// Command release-gate refuses a release unless the tagged commit is on main
+// and CI's gate passed for that exact commit. .github/workflows/release.yml
+// runs it before anything is built or published:
+//
+//	go run ./test/tools/release-gate -sha <commit> -main-ref <ref> \
+//	    -status-context 'CI / CI Gate (push)' -workflow ci.yml -job-name 'CI Gate'
+//
+// # Why
+//
+// A `v*` tag used to publish on its own: the release workflow ran on the tag
+// push with no dependency on CI, so a tag on a commit whose CI was red, still
+// running, canceled or never run published binaries all the same. The release
+// commit and its tag are pushed together (`make release-alpha`, which derives the
+// next alpha or takes `VERSION=vX.Y.Z-alpha`, `make release-candidate VERSION=…` or
+// `make release VERSION=…`), so CI for the commit is normally still running when
+// this starts. This command therefore
+// WAITS for the gate's result rather than reading it once, and refuses on
+// anything but a pass.
+//
+// # What it reads
+//
+// On a self-hosted (Gitea) forge, the commit's combined status, for the
+// context CI's gate job reports on a push to main -- the same signal the
+// merge automation trusts. On github.com, the Actions API: the latest run of
+// the CI workflow FILE for this commit with event=push on main, and that
+// run's gate job. Not a check run looked up by name: a check run of the same
+// name from a pull_request run, an older run or another app would otherwise
+// count. On either forge it then reads signatures.yml's result for the same
+// commit the same way (the "Signatures / Signatures (push)" status on Gitea,
+// the Signatures job of the latest push-to-main run on github.com): commit
+// signatures are checked there, outside CI Gate, so a green CI Gate alone
+// does not let a release through. Either way only "passed" lets the release through. A gate that failed, errored, was canceled or reported
+// anything this command does not recognize stops it at once. A gate that
+// reports nothing before the deadline also stops it.
+//
+// The token comes from FORGE_TOKEN in the environment, never from a flag, so
+// it does not appear in a process listing.
 package main
 
 import (

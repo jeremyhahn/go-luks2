@@ -16,7 +16,12 @@ import (
 
 const sha1CostSamples = 3
 
-// SHA1Iterations converts a PBKDF2-SHA1 iteration count to the PBKDF2-SHA256 count of equal work, using timer to measure relative speed.
+// SHA1Iterations converts a PBKDF2-SHA1 keyslot's iteration count into the
+// PBKDF2-SHA256 count that carries over the same work: a theoretical estimate
+// from each hash's block count, reconciled against this host's measured
+// relative speed of the two, so a host where SHA-1 happens to be slower than
+// SHA-256 is not under-converted. timer is WallClockPBKDF2 in production; a
+// test gives a model.
 func (d Deriver) SHA1Iterations(sha1Iterations, keySize int, timer Timer) (int, error) {
 	if sha1Iterations <= 0 || keySize <= 0 {
 		return 0, &errs.Error{Kind: errs.ErrInvalidKeyslot, Detail: "a PBKDF2-SHA1 keyslot of " + strconv.Itoa(sha1Iterations) +

@@ -2,7 +2,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package clock is how waiting code sees time, so tests can bound waits on a clock they control; waits select on a Timer, never Sleep.
+// Package clock is how code that waits sees time.
+//
+// A wait asks a Clock for the time and for a timer, never the time package
+// directly, so its bound can be tested on a clock the test controls. Asserted
+// on the wall clock, a deadline test's verdict depends on what else the
+// machine is doing; on a Fake it depends only on the code.
+//
+// There is no Sleep. A wait selects on a Timer's channel, which is the form
+// that can also select on a context.
 package clock
 
 import "time"

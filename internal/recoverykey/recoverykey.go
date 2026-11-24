@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package recoverykey renders recovery keys as text and reads them back inside protected memory, never building a Go string.
+// Package recoverykey renders recovery keys as text and reads them back,
+// entirely inside protected memory.
+//
+// A recovery key's printed text IS the credential a keyslot holds, so every
+// step here works on bytes in locked pages and never builds a Go string: a
+// string holding a credential can never be wiped, and strings.ToUpper,
+// ToLower, TrimSpace and Split would each make another one.
 package recoverykey
 
 import (
@@ -72,7 +78,10 @@ func Render(c secret.Custody, key enclave.ByteAccess, f Format) (enclave.ByteAcc
 	return credential, nil
 }
 
-// Hash returns the hex SHA-256 of the credential text, printed beside the key to check a transcription.
+// Hash returns the SHA-256 of the credential text, hex-encoded. It is a
+// one-way function of the credential and is not itself secret: it is printed
+// beside the key so a transcription can be checked without the volume. It is
+// computed inside the borrow only because that is where the text is readable.
 func Hash(credential enclave.ByteAccess) (string, error) {
 	var sum [sha256.Size]byte
 	if err := secret.Borrow("recovery key", credential, func(b []byte) error {
@@ -116,7 +125,20 @@ func renderInto(dst, key []byte, f Format) {
 	}
 }
 
-// Credential returns the credential text with surrounding whitespace trimmed and nothing else changed, refusing more than one line.
+// Credential returns the credential typed or pasted text names, in a new
+// enclave c allocates: the text with surrounding whitespace trimmed, because a
+// paste carries it and no keyslot holds it.
+//
+// NOTHING ELSE IS TOUCHED. Case is significant, the dashes are significant, and
+// a credential that has been "canonicalized" on the way in is a credential the
+// volume has never seen. That is the contract cryptsetup offers when the same
+// string is pasted at its own prompt, and the two must agree: the credential is
+// text precisely so that stock cryptsetup can open the volume.
+//
+// A newline inside the trimmed text means more than one line was handed in --
+// a whole file, most likely -- and is refused rather than silently taking the
+// first line, because guessing which line somebody meant is how the wrong
+// string gets enrolled or tested.
 func Credential(c secret.Custody, text enclave.ByteAccess) (enclave.ByteAccess, error) {
 	var credential enclave.ByteAccess
 	err := secret.Borrow("recovery key", text, func(b []byte) error {
@@ -137,7 +159,11 @@ func Credential(c secret.Custody, text enclave.ByteAccess) (enclave.ByteAccess, 
 	return credential, nil
 }
 
-// FirstLine returns the first non-blank, non-comment line of contents, trimmed, as a sub-slice, or nil.
+// FirstLine returns the first line of a recovery key file that is neither
+// blank nor a comment, trimmed, as a SUB-SLICE of contents -- which the caller
+// holds in locked memory -- or nil when there is none. It walks bytes rather
+// than using strings.Split, which would allocate an unwipeable string per
+// line of a file whose whole point is to hold a credential.
 func FirstLine(contents []byte) []byte {
 	for len(contents) > 0 {
 		line := contents
@@ -156,7 +182,14 @@ func FirstLine(contents []byte) []byte {
 	return nil
 }
 
-// Decode turns a rendering (dashed hex, hex or base64, any case) back into key material in a new enclave.
+// Decode turns a rendering held in locked memory back into the KEY MATERIAL
+// behind it, in a new enclave c allocates, normalising inside locked scratch.
+//
+// It is tolerant in a way Credential is deliberately not -- either case, with
+// or without dashes, hex or base64 -- because it decodes a rendering rather
+// than reproducing a credential. The format decision: dashes mean dashed hex;
+// an all-hex even-length body is tried as hex first; a trailing '=' or any
+// non-hex character admits base64; and hex is the fallback.
 func Decode(c secret.Custody, rendered enclave.ByteAccess) (enclave.ByteAccess, error) {
 	var key enclave.ByteAccess
 

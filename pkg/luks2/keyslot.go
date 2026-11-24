@@ -49,7 +49,24 @@ const (
 	keyslotPriorityPrefer = 2
 )
 
-// Priority is a keyslot's try-order preference; the zero value PriorityDefault means not asked for, and values are the on-disk encoding plus one.
+// Priority is a keyslot's try-order preference.
+//
+// Its zero value, PriorityDefault, is "not asked for": a new keyslot gets the
+// LUKS2 default (normal) and ChangeKeyslot keeps the slot's existing
+// priority. Every other value is an explicit request, so PriorityIgnore is
+// something a caller can only get by naming it, never by leaving a field
+// unset.
+//
+// Priority governs Unlock, which tries every PriorityPrefer keyslot before any
+// PriorityNormal one and never tries a PriorityIgnore keyslot, as cryptsetup
+// does when no keyslot is named. A PriorityIgnore keyslot still opens through
+// UnlockKeyslot, which names it.
+//
+// The values are the on-disk encoding plus one (keyslotPriorityIgnore/Normal/
+// Prefer are 0/1/2; PriorityIgnore/Normal/Prefer are 1/2/3), so the mapping
+// each way is a single rule that loses nothing: priorityFromDisk and
+// onDiskPriority. A KeyslotInfo never reports PriorityDefault, because an
+// absent on-disk member reads back as PriorityNormal.
 type Priority int
 
 const (
@@ -100,7 +117,10 @@ type addKeyOptionsForTest struct {
 	// header.Keyslot specifies which keyslot to use (nil = auto-select)
 	Keyslot *int
 
-	// KDFType is "pbkdf2" (or a hash alias), "argon2i" or "argon2id"; empty means DefaultKDFSpec, or Argon2id when an Argon2 cost is set.
+	// KDFType specifies the KDF type: "pbkdf2" (or an alias naming the hash,
+	// such as "pbkdf2-sha512"), "argon2i" or "argon2id". Empty means
+	// DefaultKDFSpec -- PBKDF2-SHA512 in FIPS 140-3 mode, Argon2id otherwise
+	// -- or Argon2id when an Argon2 cost is set.
 	KDFType string
 
 	// Hash specifies the hash algorithm for PBKDF2. Empty means the hash the
@@ -116,10 +136,33 @@ type addKeyOptionsForTest struct {
 	// PBKDF2 parameters (for pbkdf2 KDF type)
 	PBKDFIterTime int
 
-	// InheritedArgon2Cost is set by AddKey to the Argon2 cost taken from the container, and nil otherwise.
+	// InheritedArgon2Cost is WRITTEN BY AddKey and never read by it. It carries
+	// the Argon2 cost the new keyslot was given when that cost came FROM THE
+	// CONTAINER rather than from this package's defaults, and is nil otherwise.
+	//
+	// It exists because the inherited value must not be silent. A volume
+	// deliberately formatted at 512 MiB -- chosen so it stays openable from a
+	// rescue USB or a small recovery box -- used to gain keyslots at this
+	// package's hardcoded 1 GiB default, inconsistent with every neighbor and
+	// precisely on the credential added for a recovery scenario. Inheriting
+	// fixes that by construction; reporting it is what lets an operator SEE
+	// which cost was used and that it was taken from the volume.
+	//
+	// A field rather than a log line, for the reason recorded on
+	// header.Metadata.DroppedNullEntries (internal/header/types.go): a logger in a layer-0 primitive, or a write
+	// to log/slog's process-global default, imposes a logging decision on every
+	// embedding application. cmd/luks2 is the application that turns this into
+	// something an operator reads.
 	InheritedArgon2Cost *header.KDF
 
-	// PBKDFIterations is an exact PBKDF2 count, overriding PBKDFIterTime; below the hash's floor it is refused with ErrPBKDFIterationsTooLow.
+	// PBKDFIterations is an exact PBKDF2 iteration count. When it is non-zero
+	// it is written as given and PBKDFIterTime is not consulted, so a keyslot
+	// added to two machines from one specification carries identical cost
+	// instead of whatever each machine's benchmark happened to measure.
+	//
+	// It does NOT bypass the iteration floor -- see forcedPBKDF2Iterations. A
+	// count below the minimum for the chosen hash is refused with
+	// ErrPBKDFIterationsTooLow rather than written.
 	PBKDFIterations int
 
 	// No key-size or cipher option: the keyslot key size must equal the volume key length.
@@ -132,10 +175,17 @@ type KeyslotParams struct {
 	// *Key came from.
 	Slot *int
 
-	// Priority is the try-order preference; PriorityDefault gives normal on add and keeps the existing priority on ChangeKeyslot.
+	// Priority is the keyslot's try-order preference. PriorityDefault, the
+	// zero value, gives a new keyslot the LUKS2 default (normal) and makes
+	// ChangeKeyslot keep the slot's existing priority. PriorityIgnore and
+	// PriorityPrefer are written as an explicit member; PriorityNormal is
+	// written as no member at all, cryptsetup's own encoding of normal.
 	Priority Priority
 
-	// KDF is the new keyslot's cost; zero resolves to the default KDF or the container's inherited Argon2 cost.
+	// KDF is the new keyslot's key-derivation cost. A zero KDFParams resolves
+	// through this package's add-key policy: the library's
+	// default KDF, or an inherited Argon2 cost when the container already
+	// has one and the caller named neither a type nor a cost.
 	KDF KDFParams
 }
 
@@ -282,7 +332,7 @@ func testKeyForTestWithSys(device string, passphrase []byte, sys volumeSys) erro
 		return err
 	}
 
-	// One descriptor for the header and every keyslot read (#249, A10).
+	// One descriptor for the header and every keyslot read (A10).
 	f, err := openDevice("read the LUKS2 header", device, os.O_RDONLY, sys)
 	if err != nil {
 		return err
@@ -315,7 +365,7 @@ func addKeyWithPolicy(ctx context.Context, device string, existingPassphrase, ne
 	}
 
 	// Lock the device and keep the locked descriptor for everything below
-	// (#249, A10).
+	// (A10).
 	lock, dev, err := lockKeyslotDevice(ctx, device, sys)
 	if err != nil {
 		return -1, err
@@ -553,7 +603,7 @@ func changeKeyWithSys(device string, oldPassphrase, newPassphrase []byte, keyslo
 
 	// Lock the device and keep the locked descriptor for everything below:
 	// this used to resolve the path six times and write the new material
-	// through a raw os.OpenFile (#249, A10).
+	// through a raw os.OpenFile (A10).
 	lock, dev, err := lockKeyslotDevice(ctx, device, sys)
 	if err != nil {
 		return err
@@ -847,7 +897,16 @@ type KeyslotInfo struct {
 	Priority   Priority
 	Encryption string
 
-	// KDF reports the cost written, including an inherited Argon2 cost; a zero Type means the keyslot has no KDF.
+	// KDF reports the cost actually written, including an inherited Argon2
+	// cost (formerly an InheritedArgon2Cost out-parameter on the add-key options).
+	//
+	// It matters most where the costs on one volume DIFFER. ChangeKeyslot
+	// preserves a slot's existing Argon2 memory cost even when it sits below
+	// MinArgon2MemoryKB -- deliberately, because raising it would ask the
+	// formatting hardware for RAM it may not have -- so a rotated slot can
+	// legitimately read below what AddKeyslot would ever write. A zero
+	// KDFParams.Type means the keyslot has no KDF at all (a "reencrypt"
+	// keyslot in progress), not that the KDF failed to parse.
 	KDF KDFParams
 }
 
@@ -948,7 +1007,7 @@ func getMasterKeySlot(ctx context.Context, dev io.ReaderAt, device string, passp
 		}
 		// An id cryptsetup cannot address -- "01", "32", "abc" -- is not a
 		// keyslot any LUKS2 implementation opens (see listKeyslotsFrom for the
-		// measurements), so it is not one this scan opens either (#249, A9).
+		// measurements), so it is not one this scan opens either (A9).
 		if _, ok := header.CanonicalKeyslotID(id); !ok {
 			continue
 		}

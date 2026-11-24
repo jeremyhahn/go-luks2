@@ -12,10 +12,23 @@ import (
 
 // Sentinels for the conditions a caller can act on.
 var (
-	// ErrLedgerUnavailable indicates the write-ahead ledger could not be opened or written, so the caller must not create host state.
+	// ErrLedgerUnavailable indicates the write-ahead ledger could not be
+	// opened or written, and that the caller must therefore NOT create host
+	// state.
+	//
+	// It is fatal by design. The whole guarantee this package offers is that
+	// nothing is created before it is recorded, so a caller that proceeds after
+	// a failed record creates exactly the unattributable state the ledger
+	// exists to prevent -- and it does so silently, which is worse than not
+	// running. See Ledger.Record.
 	ErrLedgerUnavailable = errors.New("the write-ahead ledger is unavailable, so host state must not be created")
 
-	// ErrLedgerCorrupt indicates a ledger file could not be parsed; the reaper fails rather than skip it.
+	// ErrLedgerCorrupt indicates a ledger file could not be parsed.
+	//
+	// The reaper does not skip past a corrupt line and carry on. A ledger it
+	// cannot read in full is a ledger whose contents it does not know, and
+	// proceeding would report a clean reap having examined an unknown subset --
+	// the failure mode a fail-closed guard exists to refuse.
 	ErrLedgerCorrupt = errors.New("the write-ahead ledger could not be parsed")
 
 	// ErrReapIncomplete indicates the reaper found recorded host state it could
@@ -43,7 +56,12 @@ func (e *RecordError) Unwrap() error { return e.Err }
 // underlying cause through Unwrap.
 func (e *RecordError) Is(target error) bool { return target == ErrLedgerUnavailable }
 
-// ReapError reports every piece of host state a reap could not remove.
+// ReapError reports host state that a reap could not remove.
+//
+// It carries every failure rather than the first, because a caller deciding
+// whether the host is usable needs the whole list: stopping at the first would
+// under-report the damage and invite a retry that fixes one item and reports
+// success.
 type ReapError struct {
 	Failures []ReapFailure
 }
@@ -124,7 +142,11 @@ func (e *RunRootError) Error() string {
 	return fmt.Sprintf("refusing to %s %q: %s", e.Action, e.Path, e.Problem)
 }
 
-// UnboundRunRootError reports a recorded run root whose name lacks its run's id while loop devices are backed under it; they are left alone and the host is not declared clean.
+// UnboundRunRootError reports a recorded run root whose name does not carry the
+// id of the run whose ledger recorded it, while loop devices are backed under
+// it. Those devices may be a LIVE run's: before #247 a run root was named only
+// by a 32-bit random suffix, so two containers could create the same name. They
+// are left alone, the record is kept, and the host is not declared clean.
 type UnboundRunRootError struct {
 	Root    string
 	RunID   string

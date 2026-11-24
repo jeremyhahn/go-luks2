@@ -62,7 +62,10 @@ func keyslotInfoFor(metadata *header.Metadata, slot int, op, path string) (Keysl
 	return KeyslotInfo{}, errAt(op, path, &errs.Error{Kind: errs.ErrIO, Detail: fmt.Sprintf("keyslot %d written but not found while reading it back", slot)})
 }
 
-// AddKeyslot enrolls a new passphrase in a free keyslot (or p.Slot), wrapping the volume key key holds; key is the proof of ownership.
+// AddKeyslot enrolls a new passphrase in a free keyslot (or p.Slot), wrapping
+// the volume key key already holds. It takes no existing
+// credential: key is the caller's proof of ownership, which is what AddKey's
+// old passphrase argument was for.
 func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -131,7 +134,18 @@ func (v *Volume) AddKeyslot(ctx context.Context, key *Key, pass enclave.ByteAcce
 	return keyslotInfoFor(metadata, slot, op, v.path)
 }
 
-// ChangeKeyslot re-wraps key's volume key under a new passphrase in key's keyslot; a zero p.KDF keeps the slot's KDF, a non-zero one re-costs it as AddKeyslot would, and PriorityDefault keeps the priority.
+// ChangeKeyslot re-wraps key's volume key under a new passphrase, in the
+// keyslot key was recovered from.
+// p.Slot is not consulted -- the slot is key's, not a choice this call
+// makes. A zero p.KDF keeps the keyslot's existing KDF type and cost, as the
+// old ChangeKey this shares its write path with does (a PBKDF2-SHA1 slot is
+// still rewritten as PBKDF2-SHA256; see changeKeyslotCore). A non-zero p.KDF
+// re-costs the slot exactly as AddKeyslot would write it -- the same
+// validation, the same FIPS refusal of Argon2, the same benchmark when only
+// IterTime is given -- which is cryptsetup luksChangeKey's --pbkdf* behavior.
+// p.Priority is consulted too: PriorityDefault keeps the slot's existing
+// priority, and any other value is written (onDiskPriority) the same way
+// AddKeyslot's is.
 func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteAccess, p KeyslotParams) (KeyslotInfo, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -218,7 +232,11 @@ func (v *Volume) ChangeKeyslot(ctx context.Context, key *Key, pass enclave.ByteA
 	return keyslotInfoFor(metadata, slot, op, v.path)
 }
 
-// RemoveKeyslot removes slot, refusing with ErrLastKeyslot if nothing else could open the volume; removal is guarded, not authenticated.
+// RemoveKeyslot removes slot, refusing with ErrLastKeyslot if nothing else
+// could still open the volume afterward. It takes no credential:
+// removal is guarded, not authenticated -- every data-safety guard stays,
+// and authorization to remove a keyslot is the caller's policy, the same as
+// the old KillKeyslot's.
 func (v *Volume) RemoveKeyslot(ctx context.Context, slot int) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

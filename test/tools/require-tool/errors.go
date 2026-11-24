@@ -20,7 +20,10 @@ func (e *UsageError) Error() string {
 	return "usage: require-tool <binary> <pin> <module-path> [go-install args...]: " + e.Problem
 }
 
-// MissingToolError reports a tool absent from a self-hosted runner, an image defect never fixed by a network install.
+// MissingToolError reports a tool absent from a self-hosted runner. That is an
+// IMAGE defect, and it is not papered over with a network install: doing so
+// would restore precisely the intermittent failure baking the tools in removed,
+// while reporting success.
 type MissingToolError struct {
 	Bin string
 	Pin string
@@ -65,7 +68,11 @@ func (e *PinError) Error() string {
 
 func (e *PinError) Unwrap() error { return e.Err }
 
-// NotOnPathError reports an install that left the binary unreachable on PATH.
+// NotOnPathError reports an install that succeeded but left the binary
+// unreachable. It is caught HERE because an exported PATH does not survive this
+// process: if the binary is not reachable now it will not be reachable in the
+// step that runs it, and that failure would arrive looking like a missing tool
+// rather than a broken PATH.
 type NotOnPathError struct {
 	Bin    string
 	Module string

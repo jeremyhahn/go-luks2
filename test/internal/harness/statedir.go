@@ -88,7 +88,21 @@ const (
 
 var stateDirHook = func(stage, dir string) {}
 
-// EphemeralMarker names a file whose presence declares the state directory does not outlive its process; the image creates it, and a bind mount hides it.
+// EphemeralMarker names a file whose PRESENCE declares that the state
+// directory does not outlive the process using it.
+//
+// The container image creates one at its own /var/lib/go-luks2-test-state. A
+// bind mount SHADOWS the image's directory, so the marker is visible exactly
+// when the mount is absent -- which is precisely when the ledger is worthless:
+// the records die with the container that wrote them, while the host devices
+// they describe do not.
+//
+// This is a positive declaration rather than an inference. "Is this path a
+// mount point" would be the obvious test and it is the wrong one: a plain
+// directory on a developer's host is not a mount point and IS persistent, so
+// that check would refuse the `make host-integration-test` path while passing
+// anything that happened to be mounted. The image knows what it created, so
+// the image says so.
 const EphemeralMarker = ".ephemeral-not-a-persistent-mount"
 
 // refuseEphemeralStateDir fails when the state directory is known not to outlive its writer.

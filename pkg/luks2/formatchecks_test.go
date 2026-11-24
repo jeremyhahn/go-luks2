@@ -17,7 +17,7 @@ import (
 	"testing"
 )
 
-// Format used to write first and find out later (#248, B4): a cipher mode
+// Format used to write first and find out later (B4): a cipher mode
 // dm-crypt cannot parse, aes-cbc with a key it cannot take, a label with no
 // room for its NUL, and a device too small for the layout all produced a
 // header on the device -- and an in-use block device was formatted anyway.

@@ -88,7 +88,9 @@ func keyslotDeclaredForAllSegments(metadata *Metadata, id string) bool {
 	return true
 }
 
-// VolumeKeyDigestsView returns metadata with Digests narrowed to those that bind every data segment.
+// VolumeKeyDigestsView returns metadata with Digests narrowed to those that
+// bind EVERY data segment -- the view the keyslot scan reasons about when
+// deciding whether a keyslot holds the whole-volume key.
 func VolumeKeyDigestsView(metadata *Metadata) *Metadata {
 	segments := dataSegmentIDs(metadata)
 	view := *metadata

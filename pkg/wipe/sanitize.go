@@ -56,7 +56,15 @@ func defaultSys() sys {
 	}
 }
 
-// Sanitize destroys the data at path: one pass per pattern, optional verification and TRIM; the device is locked and claimed exclusively first, else ErrDeviceInUse.
+// Sanitize destroys the data on the device or file at path: a pass for each
+// of p's patterns, in order, optionally a read-back verification of the last
+// pass, and optionally a TRIM/DISCARD once every pass has landed.
+//
+// The device is locked (the node flock, then cryptsetup's own lock, excluding
+// cryptsetup as well) and then claimed exclusively -- a second, O_EXCL open of
+// the SAME locked descriptor's own inode, never of path again -- before a byte
+// is written. A device something else holds returns ErrDeviceInUse and
+// nothing is written.
 func Sanitize(ctx context.Context, path string, p Params) error {
 	return errs.At("wipe", "Sanitize", path, sanitize(ctx, path, p, defaultSys()))
 }

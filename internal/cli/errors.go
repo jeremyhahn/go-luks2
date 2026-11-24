@@ -81,7 +81,11 @@ func (e *KeyInputError) Error() string {
 
 func (e *KeyInputError) Unwrap() error { return e.Err }
 
-// HardeningError reports that the process could not be hardened against core dumps before handling a secret.
+// HardeningError reports that the process could not be hardened against
+// core dumps before the CLI handled a secret. The CLI stops there: the heap
+// copies internal/secret lists as raw-bytes boundaries sit outside
+// go-enclave's protected pages, and a process that could dump them must not
+// read a credential (docs/volumes/architecture.md#key-custody).
 type HardeningError struct {
 	// Err is go-enclave's HardenProcess error: a *ProcessHardeningError or
 	// *CoreDumpLimitError, or ErrProcessHardeningUnsupported.

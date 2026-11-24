@@ -8,7 +8,9 @@ import "errors"
 
 // Sentinels raised only by this package, re-exported by value from pkg/luks2.
 var (
-	// ErrUnsupportedRequirement indicates the container declares an unimplemented mandatory requirement and must not be modified; it is still readable.
+	// ErrUnsupportedRequirement indicates the container declares a mandatory
+	// requirement this package does not implement, so it must not be
+	// modified. The container is still READABLE; see Requirements.
 	ErrUnsupportedRequirement = errors.New("luks2: container declares a mandatory requirement this package does not implement")
 
 	// ErrAmbiguousJSONMember indicates a LUKS2 metadata object that names one

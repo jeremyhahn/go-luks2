@@ -14,7 +14,10 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// Info describes a filesystem as blkid's cached export reports it; the size fields and MountPoint are not populated.
+// Info describes a filesystem, as blkid's cached export reports it.
+// TotalSize, UsedSize, FreeSize and MountPoint are reserved for a future
+// probe that reads them; Inspect does not populate them today, the same as
+// the function it replaces.
 type Info struct {
 	Type       Type
 	Label      string

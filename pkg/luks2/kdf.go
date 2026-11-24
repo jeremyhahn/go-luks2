@@ -53,12 +53,34 @@ const (
 	kdfTypeArgon2id = "argon2id"
 )
 
-// DefaultKDFSpec returns the KDF for a keyslot whose caller names none: "pbkdf2-sha512" in FIPS 140-3 mode, "argon2id" otherwise, or "argon2id" when an Argon2 cost is given.
+// DefaultKDFSpec returns the KDF a keyslot is created with when the caller
+// names none, and it depends on the mode the process runs in, as cryptsetup's
+// default does:
+//
+//   - In FIPS 140-3 mode it is "pbkdf2-sha512". The iteration count is
+//     calibrated to the time budget (PBKDFIterTime, 2000 ms by default) and
+//     never falls below the policy floor for SHA-512, so the keyslot gets
+//     whichever of the two is greater.
+//   - Otherwise it is "argon2id", as it always has been.
+//
+// A FIPS default of Argon2id would refuse every caller that names no KDF with
+// ErrFIPSNotApproved.
+//
+// A caller that names no KDF but supplies an Argon2 cost has chosen Argon2 by
+// its parameters, and gets "argon2id" in either mode rather than having
+// the cost silently dropped; see resolveKDFType.
 func DefaultKDFSpec() string {
 	return defaultKDFTypeFor(fips.Probe())
 }
 
-// KDFType names a keyslot's key-derivation function in the Volume API; it carries no hash, unlike the internal on-disk aliases.
+// KDFType names a keyslot's key-derivation function in the Volume
+// API: the DESTINATION of a resolved KDFParams, as opposed to kdfTypePBKDF2
+// and its aliases above, which are the on-disk strings this package's
+// header-level internals read and write. The two constant sets are deliberately
+// distinct: KDFType carries no hash, because KDFParams.Hash says that
+// separately, and a Volume API caller never needs the alias spellings
+// ("pbkdf2-sha512") the internal formatOptionsForTest.KDFType field
+// overloads.
 type KDFType string
 
 const (
@@ -67,7 +89,11 @@ const (
 	KDFPBKDF2   KDFType = "pbkdf2"
 )
 
-// KDFParams is the KDF a keyslot is created or re-derived with; Hash, IterTime and Iterations apply to PBKDF2, Time, MemoryKiB and Parallel to Argon2.
+// KDFParams is the KDF a keyslot is created or re-derived with. Hash and the cost fields apply to exactly one of Type's two
+// families and are ignored for the other: Hash and IterTime are PBKDF2's
+// (Iterations overrides IterTime's calibration when it is non-zero, and is
+// held to the same floor a calibrated count is); Time, MemoryKiB
+// and Parallel are Argon2's.
 type KDFParams struct {
 	Type KDFType // zero: DefaultKDFType()
 
@@ -79,7 +105,15 @@ type KDFParams struct {
 	Time, MemoryKiB, Parallel int // Argon2
 }
 
-// Validate refuses a KDFParams this package cannot create, including Argon2 (named or implied) in FIPS 140-3 mode; an empty Type is judged by what it resolves to.
+// Validate refuses a KDFParams this package cannot create: a Type outside
+// the three KDFType constants, an Argon2 cost (named or implied by a nonzero
+// Time/MemoryKiB/Parallel) outside the floors and ceilings
+// validateArgon2CreateCost enforces, and -- the FIPS approval check -- an
+// Argon2 KDF, named or implied, while the process runs in
+// FIPS 140-3 mode (ErrFIPSNotApproved). An empty Type is judged by what it
+// resolves to, the same way Format and AddKeyslot resolve it, so a
+// FIPS-mode caller that gives no Type but an Argon2 cost sees the refusal
+// here rather than after a device is claimed.
 func (p KDFParams) Validate() error {
 	return p.validateWith(fips.Probe)
 }
@@ -116,7 +150,12 @@ func (p KDFParams) validateWith(fipsMode func() fips.Mode) error {
 	})
 }
 
-// DefaultKDFType returns the KDFType used when KDFParams names none: KDFPBKDF2 in FIPS 140-3 mode, KDFArgon2id otherwise.
+// DefaultKDFType returns the KDFType a keyslot is created with when
+// KDFParams names none: KDFPBKDF2 in FIPS 140-3 mode, KDFArgon2id otherwise.
+// It carries no hash -- KDFParams.Hash says that separately -- unlike
+// DefaultKDFSpec, which returns this package's internal combined alias
+// ("pbkdf2-sha512", "argon2id") instead. On disk a PBKDF2 keyslot spells
+// that as "type":"pbkdf2" plus "hash":"sha512".
 func DefaultKDFType() KDFType {
 	return defaultKDFTypeWith(fips.Probe)
 }

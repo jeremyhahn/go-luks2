@@ -37,7 +37,14 @@ func (m *Mapping) Path() string {
 // the name is never silently truncated on the way into the create ioctl.
 const MaxNameLength = 127
 
-// ValidateName validates a device-mapper mapping name for the ioctl, /dev/mapper path, dm UUID and keyring description.
+// ValidateName validates a device-mapper mapping name.
+//
+// The rules cover the name reaching the dm ioctl's fixed-width field, the
+// /dev/mapper/<name> path this package creates and removes, the dm UUID
+// that proves a target belongs to one activation, and the kernel-keyring
+// description derived from that UUID -- one whitelist for all of it. It
+// lives here rather than in pkg/luks2 because pkg/luks2 has no
+// mapping-name-shaped call site of its own.
 func ValidateName(name string) error {
 	if name == "" {
 		return &errs.Error{Kind: ErrInvalidName, Detail: "the name is empty"}

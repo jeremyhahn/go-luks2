@@ -87,7 +87,7 @@ func unlockKeyslot(ctx context.Context, device string, keyslotID string, passphr
 
 // unlockKeyslotFrom is unlockKeyslot reading the keyslot area through dev, a
 // descriptor the caller already holds -- the locked one, for a keyslot operation
-// pinned to the device it locked (#249, A10).
+// pinned to the device it locked (A10).
 func unlockKeyslotFrom(ctx context.Context, dev io.ReaderAt, keyslotID string, passphrase []byte, keyslot *header.Keyslot, digests map[string]*header.Digest, sys volumeSys) (enclave.ByteAccess, error) {
 	// screenKeyslot makes every passphrase-free rejection, shared with the removal guard; applied here too for constructed keyslots.
 	plan, err := screenKeyslot(keyslotID, keyslot, digests, sys.fipsMode)

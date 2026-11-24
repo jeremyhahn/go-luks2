@@ -167,7 +167,7 @@ func TestWipeKeyslot(t *testing.T) {
 	formatTmp(t, tmpfile, 50*1024*1024)
 
 	// See wipe_integration_test.go (now moved): WipeKeyslot must refuse to
-	// destroy a volume's only keyslot (#37, #71), the same last-keyslot
+	// destroy a volume's only keyslot, the same last-keyslot
 	// guard KillKeyslot already has.
 	if err := harness.WipeKeyslot(tmpfile, 0); err == nil {
 		t.Fatal("WipeKeyslot destroyed the only keyslot that can open this volume, and reported success")

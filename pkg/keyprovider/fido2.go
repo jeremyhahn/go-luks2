@@ -20,7 +20,13 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// TokenTypeFIDO2 is systemd-cryptenroll's FIDO2 token type, spelled as systemd spells it.
+// TokenTypeFIDO2 is the token type systemd-cryptenroll --fido2-device
+// writes, and the one this package drives.
+//
+// It is systemd's spelling, and that is deliberate: a token type is how an
+// implementation decides whether it can drive a keyslot at all, so a private
+// spelling would produce a container only this library can use -- the
+// opposite of what binding a volume to a hardware key is for.
 const TokenTypeFIDO2 = "systemd-fido2"
 
 // DefaultRelyingParty is the relying-party id systemd-cryptenroll uses.
@@ -32,7 +38,13 @@ const DefaultRelyingParty = "io.systemd.cryptsetup"
 // systemd writes.
 const SaltLength = 32
 
-// SecretLength is the hmac-secret length in bytes; it is checked, which catches a wrong output line.
+// SecretLength is the length of the hmac-secret an authenticator derives
+// from a single salt, in bytes.
+//
+// It is checked rather than assumed, and that check is the backstop for
+// fido2AssertSecretLine: reading the wrong line yields a field of some other
+// length, and refusing it turns a credential that enrolls cleanly and never
+// opens the volume into an error at enrollment time.
 const SecretLength = 32
 
 // fido2ClientDataHashLength is the length of the client data hash the
@@ -58,7 +70,14 @@ const (
 // fido2SecretEncoding is how an hmac-secret is enrolled: systemd enrolls its standard padded base64 text as the passphrase.
 var fido2SecretEncoding = base64.StdEncoding
 
-// FIDO2Params is a volume's FIDO2 binding; none of it is secret.
+// FIDO2Params is what a volume's FIDO2 binding consists of: which credential
+// on which authenticator, salted with what, and what the user has to do to
+// use it.
+//
+// None of it is secret. All of it is written into the LUKS2 header in the
+// clear -- the security comes from the authenticator refusing to derive the
+// secret without the credential and the user's consent, not from hiding the
+// parameters.
 type FIDO2Params struct {
 	// RelyingParty is the rp id the credential was made under. Empty means
 	// DefaultRelyingParty.
@@ -103,7 +122,10 @@ func (p FIDO2Params) validate() error {
 	return nil
 }
 
-// NewFIDO2Salt draws a fresh hmac-secret salt in ordinary memory; it is stored in the clear.
+// NewFIDO2Salt draws a fresh hmac-secret salt.
+//
+// It is ordinary memory on purpose: the salt is written into the header in
+// the clear and protecting the copy in this process would protect nothing.
 func NewFIDO2Salt() ([]byte, error) {
 	salt, err := randomFIDO2Bytes(SaltLength)
 	if err != nil {
@@ -156,7 +178,13 @@ func (o fido2Options) resolvedDevice() (string, error) {
 	return o.device, nil
 }
 
-// FIDO2 is the unlock side of a FIDO2 binding: a Command running fido2-assert plus base64 normalization.
+// FIDO2 is the unlock side of a FIDO2 binding: a Command running
+// fido2-assert, plus the normalization that decides what the enrolled
+// credential actually is.
+//
+// It WRAPS Command rather than reimplementing it. There is one exec path in
+// this package and this is not a second one -- what is added here is the
+// base64 round trip and nothing else.
 type FIDO2 struct {
 	cmd      *Command
 	encoding *base64.Encoding
@@ -282,7 +310,19 @@ type FIDO2CredentialParams struct {
 	UserVerification bool
 }
 
-// NewFIDO2Credential creates a credential with the hmac-secret extension (-h) and returns its id.
+// NewFIDO2Credential creates a credential on an authenticator and returns
+// its id.
+//
+// The `-h` flag is not optional and is not a preference: it is what enables
+// the hmac-secret extension ON THE CREDENTIAL, at creation. A credential
+// made without it can never produce a secret, no matter what the assertion
+// asks for, and the failure surfaces much later as an unlock that yields
+// nothing.
+//
+// The credential id is NOT secret -- it is written into the LUKS2 header in
+// the clear -- but it arrives through the same locked-memory path as
+// everything else the helpers produce, because that path is Command, and
+// having a second one would mean having a second thing to get right.
 func NewFIDO2Credential(ctx context.Context, p FIDO2CredentialParams, opts ...FIDO2Option) ([]byte, error) {
 	const op = "NewFIDO2Credential"
 
@@ -360,7 +400,12 @@ func NewFIDO2Credential(ctx context.Context, p FIDO2CredentialParams, opts ...FI
 	return id, nil
 }
 
-// FromToken builds the provider a token describes; an unsupported token type is refused.
+// FromToken builds the provider a token describes, so a volume can be opened
+// from what is recorded on the device rather than from options supplied
+// again at unlock time.
+//
+// A token type this package cannot drive is refused rather than
+// approximated.
 func FromToken(t luks2.Token, opts ...FIDO2Option) (luks2.KeyProvider, error) {
 	const op = "FromToken"
 

@@ -20,7 +20,20 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/clock"
 )
 
-// SystemRemover is the real Remover; it removes only what it is asked for, by exact name or backing path, with no sweep (see docs/volumes/engineering.md).
+// SystemRemover is the real Remover: it talks to the kernel.
+//
+// It removes ONLY what it is asked for, by exact name or exact backing path.
+// There is deliberately no sweep, no prefix match and no "remove everything
+// that looks like ours" anywhere in this file. `dmsetup remove_all` and
+// `losetup -D` are absent because they can destroy a developer's machine -- a host was measured carrying test litter and
+// a live encrypted root in the same listing -- and nothing here may reintroduce
+// them under a different spelling.
+//
+// That absence is policy, not an omission: a device no ledger recorded is
+// cleared by an operator, per device, on positive attribution with stock
+// losetup, and never by code here. The
+// reasoning is in docs/volumes/engineering.md, "A device no ledger recorded is an
+// operator's job, not this repository's".
 type SystemRemover struct{}
 
 // MappingIdentity returns the dm UUID of the live mapping called name.
@@ -78,7 +91,13 @@ func isPermissionDenied(err error) bool {
 		errors.Is(err, unix.EPERM)
 }
 
-// LoopDevicesFor returns the loop devices whose backing file is backingFile, ignoring the kernel's " (deleted)" suffix.
+// LoopDevicesFor returns the loop devices whose backing file is backingFile.
+//
+// The kernel is the source of truth, read from
+// /sys/block/loop<N>/loop/backing_file. A container that has been torn down
+// leaves its files gone, and the kernel then reports the path with a
+// " (deleted)" suffix -- which is why the comparison strips it rather than
+// requiring an exact string match against a path that no longer resolves.
 func (SystemRemover) LoopDevicesFor(backingFile string) ([]LoopDevice, error) {
 	return loopDevicesForIn("/sys/block", backingFile, captureLoopIdentity)
 }
@@ -161,7 +180,17 @@ func loopReleased(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENODEV) || errors.Is(err, unix.ENXIO)
 }
 
-// LoopDevicesUnder returns the loop devices backed by a file under dir, a bounded run root this suite created; the match is on a cleaned path plus separator.
+// LoopDevicesUnder returns the loop devices whose backing file lives under dir.
+//
+// dir must be a directory THIS suite created; see KindLoopRoot for why a prefix
+// is acceptable there and nowhere else. The check is on a cleaned path plus a
+// separator, so "/tmp/go-luks2-run-1" does not match "/tmp/go-luks2-run-10".
+//
+// dir is bounded the way RemoveDir bounds it: absolute, below the root,
+// and named like a run root. Before, only "" and "/" were refused, so a damaged
+// or forged loop-root line such as /var/lib/snapd would have detached every
+// snap's loop device. The bound is not the ownership decision -- the record is
+// -- it limits what a damaged record can reach.
 func (SystemRemover) LoopDevicesUnder(dir string) ([]LoopDevice, error) {
 	return loopDevicesUnderIn("/sys/block", dir, captureLoopIdentity)
 }
@@ -209,7 +238,17 @@ func sortLoopDevices(d []LoopDevice) {
 	sort.Slice(d, func(i, j int) bool { return d[i].Path < d[j].Path })
 }
 
-// RemoveDir removes a directory this suite created, after bounding the path: absolute, more than one component, named like a run root.
+// RemoveDir removes a directory this suite created.
+//
+// The path comes from a ledger, and a ledger is a file. The state directory is
+// validated before anything in it is read (statedir.go), so a forged entry is
+// not the expected case -- but os.RemoveAll is the one operation here whose
+// blast radius is unbounded, and a corrupt line should not be able to aim it.
+//
+// So the value is bounded before it is used: absolute, more than one component,
+// and named the way this suite names its roots. That last check is NOT the
+// ownership decision -- ownership comes from the record, as everywhere else in
+// this package -- it is a limit on what a damaged record can do.
 func (SystemRemover) RemoveDir(path string) error {
 	if err := safeToRemove(path); err != nil {
 		return err
@@ -239,7 +278,39 @@ func checkRunRoot(action, path string) error {
 	return nil
 }
 
-// DetachLoop releases a loop device with LOOP_CLR_FD through a held descriptor, refusing unless the kernel still reports the enumerated binding.
+// DetachLoop releases a loop device with LOOP_CLR_FD, refusing unless the
+// kernel still reports the device as carrying the binding that was enumerated.
+//
+// It is the single-device ioctl, never `losetup -D`, which detaches every loop
+// device on the host including a developer's mounted image.
+//
+// # Why the expectation is re-checked here rather than by the caller
+//
+// /dev/loopN is a REUSABLE name. Between enumerating a device by its backing
+// path and clearing it, the number can be released and reassigned to something
+// else entirely -- and a privileged reaper would then detach a stranger's
+// device while believing it was removing its own. The enumeration cannot close
+// that window because it works through sysfs paths, which are resolved afresh
+// on every access.
+//
+// So the check moves onto the FILE DESCRIPTOR: open the device once, ask the
+// kernel through that fd what it is currently bound to, and clear it through
+// the same fd. The lookup is no longer repeated between the check and the act.
+//
+// WHAT THIS DOES NOT CLAIM: the two ioctls are still two ioctls. There is no
+// "clear if bound to X" operation in the loop interface, so a reassignment
+// landing precisely between LOOP_GET_STATUS64 and LOOP_CLR_FD is not
+// prevented. It is narrowed from a window spanning a sysfs scan to one spanning
+// two syscalls on a held descriptor, which is the smallest the kernel offers.
+// Reassigning a loop device requires privilege in the first place, so this is a
+// correctness guard against a concurrent job, not a boundary against an
+// unprivileged attacker.
+//
+// Nor does it claim the inode is unforgeable: the backing file is typically
+// unlinked by now, and a freed inode number can be reallocated. A device that
+// were re-bound, by another privileged job, to a brand-new file that happened
+// to land on our freed inode, within the same window, would compare equal. That
+// residue is a property of the kernel interface, not of this check.
 func (SystemRemover) DetachLoop(dev LoopDevice) error {
 	// An identity that could not be captured is not a license to proceed. See
 	// LoopDevice.IdentityKnown: this is the one branch that must NOT fall

@@ -17,7 +17,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Remover is the seam between the reaper and the kernel, so its decisions can be tested without a privileged container.
+// Remover is the seam between the reaper and the kernel.
+//
+// It exists for the same reason devicemapper.go's deviceMapper does: the
+// behavior that has to be right here -- removing exactly the recorded
+// resource, and refusing when the live one is not it -- cannot be exercised
+// against a real kernel outside a privileged container, and a decision that
+// only ever runs there is a decision nothing checks.
 type Remover interface {
 	// MappingIdentity returns the dm UUID of the live mapping called name.
 	// It reports ok=false when no mapping by that name exists, which is the
@@ -35,10 +41,29 @@ type Remover interface {
 	// the given directory, in a stable order.
 	LoopDevicesUnder(dir string) ([]LoopDevice, error)
 
-	// RemoveDir removes a directory this suite created, recursively, reporting failure.
+	// RemoveDir removes a directory this suite created, recursively.
+	//
+	// It is on the Remover rather than a direct os.RemoveAll because it can
+	// FAIL, and a failure has to be reportable: the run temp root holds
+	// multi-megabyte disk images, so a removal that quietly does not happen
+	// exhausts the runner's filesystem one run at a time.
 	RemoveDir(path string) error
 
-	// DetachLoop releases a loop device only if it still carries the binding it was enumerated with; it must refuse a device whose identity was never captured.
+	// DetachLoop releases a loop device, refusing unless it still carries the
+	// binding it was ENUMERATED with -- never one re-read afterwards.
+	// Re-reading would return whatever the device is bound to now, which is
+	// precisely what a reassignment changes, so the check would agree with the
+	// reassignment and defeat itself.
+	//
+	// It takes the whole [LoopDevice] rather than a path, because the
+	// enumerated identity travels with it: a check the caller makes and then
+	// acts on separately is the race this signature exists to remove.
+	// /dev/loopN is a reusable name, and between enumerating it and clearing it
+	// the number can be reassigned to something else entirely.
+	//
+	// An implementation MUST refuse a device whose identity was never captured
+	// (LoopDevice.IdentityKnown false). "I could not find out what this is" is
+	// not a license to detach it.
 	DetachLoop(dev LoopDevice) error
 }
 
@@ -51,10 +76,13 @@ type Report struct {
 	// Removed is the state that was still present and has been removed.
 	Removed []Entry
 
-	// AlreadyGone is recorded state that no longer existed.
+	// AlreadyGone is recorded state that no longer existed -- the ordinary
+	// outcome for a run that cleaned up after itself before dying.
 	AlreadyGone []Entry
 
-	// NotOurs is recorded state whose live identity does not match the record; reported and left alone.
+	// NotOurs is recorded state whose live identity does not match what was
+	// recorded, meaning the name was reused by something else. It is REPORTED
+	// AND LEFT ALONE, which is the whole reason identity is recorded.
 	NotOurs []Entry
 
 	// LedgersSkippedAlive are ledgers whose owning run is still running. They
@@ -66,11 +94,22 @@ type Report struct {
 	// NOT a failure: disk is not a device.
 	DirsLeft []Entry
 
-	// Unremoved is recorded state the reaper failed to remove; the ledger is kept for a later retry.
+	// Unremoved is recorded state the reaper tried and failed to remove. The
+	// ledger is kept and a later run retries. It is REPORTED, never fatal --
+	// see the exit-code policy in Reap.
 	Unremoved []ReapFailure
 }
 
-// Reap removes host state recorded by previous runs, except selfRunID's, only where the live resource still carries the recorded identity; a ledger is deleted only when fully dealt with.
+// Reap removes host state recorded by previous runs of this suite.
+//
+// It processes every ledger in dir except selfRunID's, which is the live run's
+// own and whose resources are in use. Each entry is removed only where the
+// resource is still present AND still carries the identity that was recorded
+// for it; anything else is left alone and reported.
+//
+// A ledger is deleted only after every entry in it has been dealt with. A
+// partial reap leaves the file, so the next run tries again rather than
+// forgetting state that is still on the host.
 func Reap(dir, selfRunID string, rm Remover, w io.Writer) (Report, error) {
 	var report Report
 
@@ -192,7 +231,22 @@ func reapLedger(sd *trustedDir, name string, rm Remover, w io.Writer, report *Re
 	return out
 }
 
-// ReapOwn removes what this run recorded and is still present, against its own locked ledger; only a ledger with nothing outstanding may be discarded.
+// ReapOwn removes what THIS run recorded and has not already cleaned up,
+// against its own still-locked ledger.
+//
+// It exists because of a defect measured on a privileged CI runner that no amount of local reasoning had surfaced: a suite can PASS and still
+// leak. TestLoopDeviceCleanup left /dev/loop1 attached while `go test` reported
+// ok, and the run then discarded its ledger on the strength of the exit code --
+// destroying the only record of the device it had just leaked. The next run
+// reaped a ledger describing nothing and honestly reported "already gone" while
+// the device sat there.
+//
+// So an exit code is not evidence that the host is clean. The record is checked
+// against the host instead: the run removes anything it recorded that is still
+// present, and only a ledger with nothing left outstanding may be discarded.
+//
+// There is no liveness check here, and there must not be: the caller IS the
+// owner and holds the lock, so TryLock would refuse its own ledger.
 func ReapOwn(ledger *Ledger, rm Remover, w io.Writer) (Report, error) {
 	var report Report
 
@@ -232,7 +286,19 @@ func ReapOwn(ledger *Ledger, rm Remover, w io.Writer) (Report, error) {
 	return report, nil
 }
 
-// LoopDevice is a loop device with what was observed when it was enumerated: the backing path (from sysfs) and the identity the detach re-validates.
+// LoopDevice is a loop device together with everything observed about it WHEN
+// IT WAS ENUMERATED.
+//
+// The parts travel together on purpose. The backing path is what made the
+// device ours; the identity is what the detach re-validates against. Splitting
+// them and re-reading either one later would hand the check whatever the device
+// is bound to now, which is exactly what a reassignment changes.
+//
+// Ownership and identity are deliberately answered by two different sources.
+// Only sysfs can say "backed by a file under the root this run recorded", and
+// only the ioctl can be re-asked through the same descriptor the detach uses.
+// So sysfs decides whether the device is ours, once, and the identity carries
+// that decision forward onto the file descriptor.
 type LoopDevice struct {
 	Path    string // /dev/loopN
 	Backing string // what it was backed by when enumerated
@@ -242,7 +308,14 @@ type LoopDevice struct {
 	// IdentityKnown; see loopIdentity for why the path is unfit for this.
 	Identity loopIdentity
 
-	// IdentityKnown reports whether Identity was captured; a device with unknown identity is refused by the detach.
+	// IdentityKnown reports whether Identity was actually captured.
+	//
+	// It is a separate field rather than a zero-value convention because the
+	// zero identity is indistinguishable from a real one that failed to read,
+	// and those two must not be confused: a device whose identity is unknown is
+	// REFUSED by the detach, not detached on the enumeration's word. Converting
+	// "I could not verify this" into a destructive action is the defect this
+	// field exists to make impossible to write by accident.
 	IdentityKnown bool
 
 	// IdentityErr is why the capture failed, carried so the refusal can say
@@ -484,7 +557,7 @@ func rootBelongsToRun(root, runID string) bool {
 // releases the mutex and closes the directory.
 func lockReaper(dir string) (*trustedDir, func(), error) {
 	// Validated here too, not only in OpenLedger: this is the privileged side,
-	// it runs before the #85 guard, and it acts on whatever the ledgers say.
+	// it runs before the device-mapper guard, and it acts on whatever the ledgers say.
 	sd, err := openTrustedStateDir(dir)
 	if err != nil {
 		return nil, nil, err

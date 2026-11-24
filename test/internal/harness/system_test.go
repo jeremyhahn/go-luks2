@@ -247,7 +247,7 @@ func withSysfsAnswer(t *testing.T, path string, err error) {
 
 // TestReadBackingFileTreatsEveryReleasedAnswerAsAbsent pins the kernel
 // answers that mean "bound to nothing" -- ENOENT, and the ENODEV the CI
-// runner's kernel gives for a detached device (#141, run 22538) -- against the
+// runner's kernel gives for a detached device (run 22538) -- against the
 // ones that mean "could not tell", which must stay errors.
 func TestReadBackingFileTreatsEveryReleasedAnswerAsAbsent(t *testing.T) {
 	root := sysfsTree(t, map[string]string{"loop1": "/tmp/ours.img"})

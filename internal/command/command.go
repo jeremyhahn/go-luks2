@@ -4,7 +4,16 @@
 
 //go:build unix
 
-// Package command runs the external programs this module needs from fixed system directories with a minimal environment, never through PATH.
+// Package command runs the external programs this module depends on -- mkfs.*,
+// e2fsck, xfs_repair, fsck.fat, zpool, zfs, blkid -- from a FIXED set of
+// system directories with a minimal environment, never through the caller's
+// PATH.
+//
+// They run as root against a block device, so whichever binary answers to
+// "mkfs.ext4" decides what is written to that device. Resolving the name
+// through PATH let anyone who could influence the environment of a privileged
+// caller choose that binary, and the inherited environment carried whatever
+// else that caller had set -- LD_PRELOAD among it.
 package command
 
 import (
@@ -33,11 +42,15 @@ type Tools struct {
 	// Env is the whole environment a program runs with.
 	Env []string
 
-	// KillGrace is how long a canceled program gets after SIGTERM before its process group is killed; zero means killGrace.
+	// KillGrace is how long a canceled program gets after SIGTERM before its
+	// process group is killed. Zero is the default, killGrace.
 	KillGrace time.Duration
 }
 
-// System is the production Tools: the system program directories, a PATH over them, and the C locale.
+// System is the production Tools: the system program directories, and an
+// environment of a PATH over the same directories -- for programs that run
+// helpers of their own -- and the C locale, so their output is the output this
+// module parses.
 func System() Tools {
 	return Tools{
 		Dirs: []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin", "/usr/local/sbin", "/usr/local/bin"},
@@ -45,7 +58,15 @@ func System() Tools {
 	}
 }
 
-// Program is a trusted executable held open by the descriptor it was checked on, and always run through that descriptor.
+// Program is an executable file that passed the trust checks, held open by
+// the descriptor those checks were made on.
+//
+// It is run through that descriptor, never by path again: Cmd executes
+// pinnedPath, which names descriptor 3 of the child, and hands the descriptor
+// over as ExtraFiles[0]. The file that runs is therefore the file that was
+// checked, whatever has been renamed over its path since. The descriptor is
+// left open in the program -- a script's interpreter reopens it by that name
+// -- and refers only to the program's own file.
 type Program struct {
 	// Name is the path the program was asked for, which becomes argv[0].
 	Name string
@@ -120,7 +141,16 @@ func (t Tools) command(ctx context.Context, prog *Program, args ...string) *exec
 	return cmd
 }
 
-// Run runs the program name with args and returns its combined output; an unresolvable program matches ErrTool, and a canceled ctx reports ctx's error.
+// Run runs the program name with args and returns its combined output. A
+// program that cannot be resolved is an error matching ErrTool, and nothing is
+// run.
+//
+// A program killed by a canceled ctx exits on the signal Cancel sent it --
+// a non-success status -- and os/exec reports that as the plain exit error,
+// not ctx.Err() (its Cancel doc: that substitution happens only when the
+// killed program manages to still exit 0). So ctx is checked explicitly once
+// CombinedOutput returns, and its error takes over whenever ctx is the
+// reason, which is what lets a caller match errors.Is(err, context.Canceled).
 func (t Tools) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	prog, err := t.Resolve(name)
 	if err != nil {
@@ -132,7 +162,8 @@ func (t Tools) Run(ctx context.Context, name string, args ...string) ([]byte, er
 	return out, ctxError(ctx, err)
 }
 
-// Output is Run for a program whose standard output alone is parsed; stderr is not returned.
+// Output is Run for a program whose STANDARD OUTPUT alone is parsed: stderr
+// is not part of what is returned. A cancellation is reported as in Run.
 func (t Tools) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	prog, err := t.Resolve(name)
 	if err != nil {

@@ -14,7 +14,7 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/header"
 )
 
-// The data segment's offset and size were never validated (#248, B1). An
+// The data segment's offset and size were never validated (B1). An
 // offset off the 512-byte sector grid is silently rounded down by
 // device-mapper; an offset inside the header copies or the keyslots area maps
 // them into the plaintext device, where the first filesystem write destroys

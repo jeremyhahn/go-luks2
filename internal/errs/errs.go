@@ -2,7 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package errs is the module's one error shape: *Error carries Kind, Detail and the typed cause, all reachable by errors.Is and errors.As.
+// Package errs is the one error shape of this module.
+//
+// Every package in the module reports a failure as an *Error: the sentinel
+// that classifies it (Kind), the object and the reason in words (Detail), and
+// the typed cause (Err). errors.Is and errors.As reach both Kind and Err, so a
+// caller can branch on the classification and still reach the cause, such as
+// a *fs.PathError or a unix.Errno.
 package errs
 
 import (
@@ -37,7 +43,11 @@ type Error struct {
 	pkg string
 }
 
-// At fills Op and Path on err if it is an *Error with them unset, and returns err unchanged otherwise.
+// At fills Op and Path on err if it is an *Error with them unset, and
+// returns err unchanged otherwise. Every exported entry point calls it
+// exactly once, on the way out, with its own pkg prefix: this never stacks
+// a second wrapper, because an err whose Op is already set (from a lower
+// boundary that called At first) is left alone.
 func At(pkg, op, path string, err error) error {
 	if err == nil {
 		return nil
@@ -58,7 +68,11 @@ func At(pkg, op, path string, err error) error {
 	return e
 }
 
-// KindOf returns ctx's error for a cancellation, err's Kind if it is an *Error, or fallback.
+// KindOf reports the classification a new wrapper around err should carry:
+// ctx's own error if err is a context cancellation or deadline (rule 5), the
+// already-set Kind of err if it is an *Error (rule 4: a context wrapper
+// around an already-classified error takes that error's kind), or fallback
+// if err is not classified at all.
 func KindOf(err error, fallback error) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
@@ -73,7 +87,10 @@ func KindOf(err error, fallback error) error {
 	return fallback
 }
 
-// Error renders "<pkg>: <op> <path>: <kind>: <detail>: <cause>", leaving out empty parts.
+// Error renders "<pkg>: <op> <path>: <kind>: <detail>: <cause>", leaving out
+// every part that is empty. pkg, Op and Path are empty until At has run, so
+// an *Error built and never passed through At -- an internal error before it
+// reaches an exported entry point -- renders as "<kind>: <detail>: <cause>".
 func (e *Error) Error() string {
 	head := e.pkg
 	if opPath := strings.TrimSpace(e.Op + " " + e.Path); opPath != "" {

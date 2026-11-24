@@ -34,7 +34,27 @@ const maxHelperStderr = 4 << 10
 // blocked read return at once, without consulting a clock.
 var expiredDeadline = time.Unix(1, 0)
 
-// Command runs a program and reads its stdout into locked memory as the credential: WithLine picks a line without its terminator, line 0 takes stdout verbatim.
+// Command runs a program and takes its standard output as the credential.
+//
+// # Where the output goes
+//
+// The helper's stdout is read DIRECTLY INTO LOCKED MEMORY -- the pipe is
+// drained into the pages of an enclave rather than into a heap buffer that
+// io.Copy would have to be trusted to release. Material that touches the
+// ordinary heap can be swapped or core-dumped before anything gets a chance
+// to wipe it.
+//
+// # Line, and the trailing newline
+//
+// WithLine selects which 1-based line of stdout is the credential, and the
+// line TERMINATOR IS NOT PART OF IT. That is what the helper protocols need:
+// fido2-assert writes six newline-separated fields and the secret is the
+// sixth.
+//
+// Line 0 (the default) takes the whole of stdout VERBATIM, newline and all.
+// That is deliberate and matches `cryptsetup --key-file`: a helper that emits
+// a passphrase controls its own bytes, and silently trimming them is the
+// classic way a credential works one way and not the other.
 type Command struct {
 	path  string
 	args  []string
@@ -77,7 +97,12 @@ func WithArgs(args ...string) CommandOption {
 	return func(c *Command) { c.args = append([]string(nil), args...) }
 }
 
-// WithStdin sets non-secret input fed to the helper; the bytes are never wiped.
+// WithStdin sets what is fed to the helper. The FIDO2 protocols pass their
+// parameters this way.
+//
+// Stdin is for NON-SECRET helper input only. The bytes are copied into
+// ordinary memory that is never wiped, so a credential passed through it would
+// sit in an unwipeable buffer (internal/secret/doc.go lists this boundary).
 func WithStdin(b []byte) CommandOption {
 	return func(c *Command) { c.stdin = append([]byte(nil), b...) }
 }
@@ -88,7 +113,8 @@ func WithLine(n int) CommandOption {
 	return func(c *Command) { c.line = n }
 }
 
-// WithEnv adds NAME=value entries to the helper's fixed base environment.
+// WithEnv sets extra environment for the helper, as NAME=value entries,
+// added to the fixed base environment every Command runs with.
 func WithEnv(kv ...string) CommandOption {
 	return func(c *Command) { c.env = append([]string(nil), kv...) }
 }
@@ -98,7 +124,16 @@ func WithToken(t luks2.Token) CommandOption {
 	return func(c *Command) { c.token = t }
 }
 
-// NewCommand builds a Command for the absolute helper path; Passphrase checks the helper as a system tool and runs it from the checked descriptor.
+// NewCommand builds a Command that runs path, an ABSOLUTE path to the helper
+// binary.
+//
+// A relative or bare name is refused rather than searched for on PATH: an
+// unlock credential must not depend on the environment of whoever happened to
+// invoke the process. Each Passphrase checks path as internal/command checks a
+// system tool before running it, and refuses, with ErrHelperFailed, a helper
+// that anyone but root or this process's user could have replaced, or that is
+// reached through a directory or symlink that could have been; the helper then
+// runs from the descriptor that was checked, not from path again.
 func NewCommand(path string, opts ...CommandOption) (*Command, error) {
 	const op = "NewCommand"
 	if path == "" {

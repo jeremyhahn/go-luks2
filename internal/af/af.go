@@ -2,7 +2,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package af is LUKS's anti-forensic split and merge; the stripes and diffusion buffer are master key material and stay in protected memory.
+// Package af is LUKS's anti-forensic split and merge, and the custody of what
+// they produce.
+//
+// AF STRIPES ARE MASTER KEY MATERIAL. It is easy to read the split as an
+// obfuscation step and treat its output as less sensitive than its input, and
+// that is backwards: the split is reversible with nothing but the stripes
+// themselves -- Merge takes no key -- so holding the stripes is holding the
+// master key, spread over keySize*stripes bytes instead of keySize. For the
+// default 512-bit key and 4000 stripes that is 256 KiB of key material, four
+// thousand times the surface of the key it encodes, which is precisely why it
+// must not sit on the ordinary heap.
+//
+// The diffusion buffer carries the same weight. It is the running XOR of the
+// stripes, and combined with the final stripe it yields the key directly.
 package af
 
 import (
@@ -38,7 +51,12 @@ type Codec struct {
 	FIPS    fips.Mode
 }
 
-// Split performs anti-forensic splitting in protected memory; the returned enclave holds key.Size()*p.Stripes bytes and is the caller's to destroy.
+// Split performs anti-forensic splitting entirely inside protected memory: the
+// key is borrowed from its enclave, the stripes are generated into locked
+// pages, and the diffusion state lives in a locked page of its own.
+//
+// The returned enclave holds key.Size()*p.Stripes bytes and is the caller's to
+// destroy. p.Hash must be one a new keyslot may be written with (ValidateWriteHash).
 func (c Codec) Split(key enclave.ByteAccess, p Params) (enclave.ByteAccess, error) {
 	if p.Stripes <= 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "stripes must be positive"}
@@ -84,7 +102,13 @@ func (c Codec) Split(key enclave.ByteAccess, p Params) (enclave.ByteAccess, erro
 	return result, nil
 }
 
-// Merge reverses Split in protected memory, consuming keySize*p.Stripes bytes of split and refusing a shorter one as ErrInvalidKeyslot.
+// Merge reverses Split for a keySize-byte key without either the stripes or
+// the recovered key leaving protected memory.
+//
+// split may be LARGER than keySize*p.Stripes -- a keyslot area on disk is 4
+// KiB-aligned, so the decrypted area usually is -- and only that many bytes
+// are consumed: merging the trailing alignment padding into the key would
+// corrupt it. A split shorter than that is refused as ErrInvalidKeyslot.
 func (c Codec) Merge(split enclave.ByteAccess, keySize int, p Params) (enclave.ByteAccess, error) {
 	if keySize <= 0 || p.Stripes <= 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidKeyslot, Detail: "the anti-forensic material is not the size its stripes and key size declare"}
@@ -259,7 +283,11 @@ func ValidateReadHash(name string) error {
 	return ValidateWriteHash(name)
 }
 
-// RequireApprovedHash refuses SHA-1 as an anti-forensic hash in FIPS 140-3 mode, where it would otherwise merge wrong bytes silently.
+// RequireApprovedHash refuses a non-approved anti-forensic hash -- SHA-1 -- in
+// FIPS 140-3 mode, naming it. SHA-1 is not an approved diffuser for key
+// material, and under GODEBUG=fips140=only the Go module makes sha1's Write
+// return an error that hash.Hash callers discard, so the merge would otherwise
+// complete with wrong bytes rather than fail.
 func RequireApprovedHash(mode fips.Mode, name string) error {
 	if name != "sha1" {
 		return nil

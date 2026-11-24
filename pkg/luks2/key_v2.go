@@ -26,7 +26,10 @@ func decodeDevNo(devNo uint64) (major, minor uint32) {
 	return unix.Major(devNo), unix.Minor(devNo)
 }
 
-// Key is a LUKS2 volume key bound to its volume and keyslot; its bytes are reachable only through volkey.Borrow inside this module.
+// Key is a LUKS2 volume key: a capability obtained only by unlocking, bound
+// to the volume and the keyslot it was recovered from. Its bytes are not
+// exported; volkey.Borrow, reachable only inside this module, is the only
+// route to them, so a consumer cannot extract the key through this type.
 type Key = volkey.Key
 
 // Target is the dm-crypt activation parameters for an unlocked key. It
@@ -60,7 +63,7 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 
 	// A container mid an operation this package does not implement (an
 	// interrupted cryptsetup reencrypt is the case that matters) must be
-	// refused for activation, the same as for a write (#250, C2).
+	// refused for activation, the same as for a write.
 	if err := metadata.CheckRequirementsImplemented(); err != nil {
 		_ = locked.Unlock()
 		detail, _ := unsupportedRequirementDetail(err)
@@ -77,7 +80,11 @@ func (v *Volume) unlockHeader(ctx context.Context, op string) (*device.Locked, s
 	return locked, segmentID, metadata, nil
 }
 
-// Unlock tries the keyslots bound to the data segment against pass: PriorityPrefer, then PriorityNormal, each in id order; pass is only borrowed.
+// Unlock recovers the volume key by trying the keyslots bound to the volume's
+// data segment against pass: every PriorityPrefer keyslot, then every
+// PriorityNormal one, each in ascending id order. A PriorityIgnore keyslot is
+// not tried; UnlockKeyslot opens it by name. pass is the caller's enclave and
+// stays the caller's: it is only ever borrowed.
 func (v *Volume) Unlock(ctx context.Context, pass enclave.ByteAccess) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -107,7 +114,10 @@ func (v *Volume) Unlock(ctx context.Context, pass enclave.ByteAccess) (*Key, err
 	return volkey.New(masterKey, slot), nil
 }
 
-// UnlockKeyslot recovers the volume key from exactly keyslot, refusing with ErrKeyslotNotFound if it is missing or not bound to the data segment.
+// UnlockKeyslot recovers the volume key from exactly keyslot, whatever its
+// priority, refusing with ErrKeyslotNotFound if it does not exist or is not
+// bound to the volume's data segment -- trying it anyway would risk
+// recovering a key this volume's data segment was never encrypted with.
 func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass enclave.ByteAccess) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -140,7 +150,10 @@ func (v *Volume) UnlockKeyslot(ctx context.Context, keyslot int, pass enclave.By
 	return volkey.New(masterKey, keyslot), nil
 }
 
-// UnlockWithVolumeKey verifies vk against the digests and returns a Key bound to no keyslot (Keyslot() is -1) holding its own copy.
+// UnlockWithVolumeKey verifies vk against the volume's digests and returns
+// it as a Key bound to no keyslot (header.Keyslot() reports -1). vk is the
+// caller's enclave and stays the caller's: the returned Key holds its own
+// copy.
 func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk enclave.ByteAccess) (*Key, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -175,7 +188,16 @@ func (v *Volume) UnlockWithVolumeKey(ctx context.Context, vk enclave.ByteAccess)
 	return volkey.New(cloned, -1), nil
 }
 
-// Target computes dm-crypt parameters from the re-read header and refuses with ErrWrongKey a key that header does not verify.
+// Target computes the dm-crypt activation parameters for the volume's
+// current header, re-reading it under the shared lock, and verifies key
+// against that header's digest for the segment it maps.
+//
+// key was verified when it was unlocked, against the header as it was then.
+// The header can have been rewritten since, by this process or another, and
+// a table built from the new header must not be handed a key that does not
+// open it: a key the re-read header does not verify is refused with
+// ErrWrongKey, as is a key unlocked from a different volume. Beyond that
+// check, key is consulted only for its size.
 func (v *Volume) Target(ctx context.Context, key *Key) (*Target, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

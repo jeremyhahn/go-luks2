@@ -9,13 +9,28 @@ import (
 	"strings"
 )
 
-// ExemptFile is the tracked root file listing binary and oversize files the release may carry, one per line as path, whitespace, reason; read from the git index.
+// ExemptFile is the tracked file, at the repository root, that lists the
+// binary and oversize files the public release may carry. The gate fails
+// closed on both kinds -- binary content is not reviewable as text, and an
+// oversize blob is not read at all -- so each one that is meant to ship is
+// named there with the reason a person accepted it.
+//
+// The format is one file per line: its exact repository-relative path, then
+// whitespace, then the reason. `#` starts a comment line; blank lines are
+// ignored. The list is read from the git index like everything else the gate
+// sees, so an exemption edited in the working tree and not staged does not
+// count.
 const ExemptFile = "releasability-exempt.txt"
 
 // Exemptions maps an exempt path to its reason.
 type Exemptions map[string]string
 
-// ParseExemptions reads ExemptFile's content, refusing untracked paths, missing reasons and duplicates; any error stops the gate.
+// ParseExemptions reads ExemptFile's content. tracked is every path in the
+// index: an exemption for a path that is not tracked is refused, because a
+// stale entry is an exemption waiting for whatever file takes that name next.
+// A line with no reason, and a path listed twice, are refused too. Any error
+// stops the gate (exit 2); a malformed list never narrows to the lines that
+// happened to parse.
 func ParseExemptions(content []byte, tracked map[string]bool) (Exemptions, error) {
 	ex := Exemptions{}
 	for n, line := range strings.Split(string(content), "\n") {

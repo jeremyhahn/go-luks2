@@ -271,14 +271,26 @@ func formatCore(ctx context.Context, f *os.File, device string, opts, kdfOpts fo
 	return writeHeaderTo(f, hdr, metadata, sys.syncDevice)
 }
 
-// DefaultCipher is AES-XTS with a 512-bit key, cryptsetup's default.
+// DefaultCipher is the cipher dm-crypt is configured with when
+// FormatParams.Cipher names none: AES-XTS with a 512-bit key (two 256-bit
+// half-keys) -- cryptsetup's own default, and the strongest combination
+// formatCiphers allows.
 const DefaultCipher = "aes-xts-plain64"
 
 // DefaultHash is the digest and anti-forensic hash Format uses when
 // FormatParams.Hash names none.
 const DefaultHash = crypto.SHA256
 
-// FormatParams is a new container's parameters; Cipher is one cryptsetup spec, and Hash is independent of KDF.Hash.
+// FormatParams is a new LUKS2 container's parameters.
+//
+// Cipher is one cryptsetup spec ("aes-xts-plain64"), unlike the internal
+// formatOptionsForTest.Cipher/CipherMode pair, because that is the form dm-crypt's
+// table entry takes and a caller who knows cryptsetup's option already
+// knows it. Hash is FormatParams' own digest and anti-forensic hash; it is
+// independent of KDF.Hash, the keyslot's PBKDF2 PRF -- the two were one
+// conflated formatOptionsForTest.HashAlgo field before this type, with an alias
+// spelling in KDFType breaking the tie when a caller set only one of them.
+// A FormatParams caller sets each the API names for.
 type FormatParams struct {
 	Cipher       string      // cryptsetup spec; zero: DefaultCipher
 	KeySize      int         // bits; zero: DefaultKeySize
@@ -291,7 +303,14 @@ type FormatParams struct {
 	KDF KDFParams
 }
 
-// Validate refuses a FormatParams Format cannot write, including KDFParams.Validate's refusals; nothing is touched on error.
+// Validate refuses a FormatParams Format cannot write: a cipher, mode and
+// key size outside formatCiphers, a label or subsystem that does not fit
+// its header field, a key or sector size outside the sizes this
+// package supports, a metadata size outside cryptsetup's power-of-two range,
+// and everything KDFParams.Validate refuses on p.KDF -- including,
+// in FIPS 140-3 mode, an Argon2 KDF named or implied by a nonzero Argon2
+// cost. Nothing is read, created or written on p's device when this
+// returns an error.
 func (p FormatParams) Validate() error {
 	return p.validateWith(fips.Probe)
 }
@@ -405,7 +424,11 @@ func (p FormatParams) toFormatOptions(device string, fipsMode fips.Mode) (opts, 
 	return opts, kdfOpts
 }
 
-// Format creates a new LUKS2 container on v's device through v's pinned descriptor and lock; pass is only borrowed.
+// Format creates a new LUKS2 container on v's device,
+// writing exactly what the package-level Format writes, through v's own
+// pinned descriptor and exclusive lock rather than reopening the path a
+// second time. pass is the caller's enclave and stays the caller's: it is
+// only ever borrowed, for the passphrase derivation.
 func (v *Volume) Format(ctx context.Context, pass enclave.ByteAccess, p FormatParams) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()

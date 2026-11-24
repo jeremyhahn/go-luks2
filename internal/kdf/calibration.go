@@ -22,7 +22,8 @@ const (
 	// be asked for.
 	MaxPBKDF2IterTimeMs = 600_000
 
-	// PBKDF2ReferenceTargetMs is the 2-second budget the OWASP counts are scaled from.
+	// PBKDF2ReferenceTargetMs is the 2-second budget PBKDF2IterationFloor
+	// scales the OWASP-recommended count relative to.
 	PBKDF2ReferenceTargetMs = 2000
 
 	// DigestIterationTargetMs and DigestCalibrationKeyLen are the budget and
@@ -32,7 +33,8 @@ const (
 	DigestCalibrationKeyLen = 64
 )
 
-// PBKDF2RecommendedIterations are OWASP's PBKDF2-HMAC counts at a 2-second budget, keyed by lowercase hash name.
+// PBKDF2RecommendedIterations are OWASP's current PBKDF2-HMAC recommended
+// counts at a 2-second budget, keyed by lowercase hash name.
 var PBKDF2RecommendedIterations = map[string]int{
 	"sha1":   1_300_000,
 	"sha256": 600_000,

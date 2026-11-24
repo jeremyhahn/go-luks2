@@ -25,7 +25,15 @@ import (
 
 // fipsMigrationOptionsForTest tunes migrateToFIPS; nil or zero is the complete import.
 type fipsMigrationOptionsForTest struct {
-	// KeepNonApprovedKeyslots keeps the original non-approved keyslots, a half-migration reported by Migration.Complete.
+	// KeepNonApprovedKeyslots keeps the original Argon2 (or PBKDF2-SHA1)
+	// keyslots instead of removing them. The default is to remove them.
+	//
+	// Keeping them is a HALF-MIGRATION: the volume then still opens in a
+	// non-FIPS process through a KDF FIPS mode cannot execute, which is not
+	// "imported" in any meaningful sense. It is offered for a staged rollout
+	// -- migrate each credential in turn, then remove the originals -- and the
+	// result says so: Migration.Complete is false and
+	// Migration.RetainedNonApproved names what was kept.
 	KeepNonApprovedKeyslots bool
 
 	// Hash is the PBKDF2 hash for the new keyslot and for any digest that is

@@ -36,7 +36,7 @@ func Unlock(device string, passphrase []byte, name string) error {
 		return fmt.Errorf("recording dm %q: TestMain did not register the suite in this process", name)
 	}
 
-	// Write-ahead (#96, #348): the mapping is in the run ledger before
+	// Write-ahead: the mapping is in the run ledger before
 	// Activate creates it, so a run that dies at any point after leaves an
 	// entry a later run's reaper can remove. A record failure refuses the
 	// activation. A live mapping that does not carry its recorded identity is

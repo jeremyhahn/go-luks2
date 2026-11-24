@@ -20,10 +20,17 @@ var (
 	// as a command-line option, or does not follow the tool's naming rules.
 	ErrInvalidArgument = errors.New("invalid filesystem option")
 
-	// ErrUnsupported indicates a filesystem type not in Supported(), raised before touching a device; ext2 and ext3 are unsupported.
+	// ErrUnsupported indicates a filesystem type that is not in Supported().
+	// Make and Check/Repair raise it before touching a device. ext2 and
+	// ext3 are deliberately in this category; Detect can still
+	// report them, as the raw strings "ext2" and "ext3", since that is what
+	// blkid found on the device.
 	ErrUnsupported = errors.New("unsupported filesystem type")
 
-	// ErrNotDetected indicates blkid found no signature, several, or one that is not a mountable filesystem.
+	// ErrNotDetected indicates that the filesystem on a device could not be
+	// determined: blkid found no signature, more than one, or one that is
+	// not a mountable filesystem. Detect returns it, and so does Mount when
+	// it is asked to detect the type rather than guessing one.
 	ErrNotDetected = errors.New("the filesystem on the device could not be determined")
 
 	// ErrTool indicates a filesystem program could not be found in the
@@ -40,7 +47,10 @@ var (
 // the detail in words, and the underlying cause, if any.
 type Error = errs.Error
 
-// CommandError reports that an external filesystem tool failed or could not start, with its combined output.
+// CommandError reports that an external filesystem tool -- a creator or a
+// checker -- exited unsuccessfully, or could not be started. It carries the
+// tool's combined output so the cause can be read without re-running it, and
+// keeps the run error reachable through Unwrap.
 type CommandError struct {
 	// Command is the program that was run.
 	Command string

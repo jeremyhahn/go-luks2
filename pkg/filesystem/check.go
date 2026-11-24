@@ -13,14 +13,22 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// CheckResult describes a successful Check or Repair; for xfs and zfs a zero result says nothing about repairs.
+// CheckResult describes a check that Check or Repair reports as successful.
+// A failed check returns an error instead. A zero result means the checker
+// reported no repair and no reboot request: for ext4 and vfat that is a
+// clean filesystem with nothing written, but xfs_repair and zpool scrub
+// never report either, so for xfs and zfs a zero result says nothing about
+// whether data was repaired (see Check).
 type CheckResult struct {
 	// Repaired is true when the checker wrote corrections to the
 	// filesystem and the filesystem is now consistent. It is only ever set
 	// by Repair.
 	Repaired bool
 
-	// RebootRequired is true when e2fsck corrected errors and asks for a reboot (exit bit 2).
+	// RebootRequired is true when the checker corrected errors and asks
+	// for the system to be rebooted before the filesystem is used (e2fsck
+	// exit status bit 2). It matters when the filesystem was mounted, for
+	// example as the root filesystem, while it was repaired.
 	RebootRequired bool
 }
 
@@ -56,13 +64,41 @@ func exitStatus(err error) int {
 	return ec.ExitCode()
 }
 
-// Check checks the filesystem of type t on device, read-only for ext4, xfs and vfat; for ZFS device is a pool name and a zpool scrub is started, not awaited.
+// Check checks the filesystem of type t on device. Every type in Supported()
+// can be checked; any other type is refused with ErrUnsupported before a
+// command is run.
+//
+// For ext4, xfs and vfat the check is read-only, and it returns nil only
+// when the filesystem is clean.
+//
+// ZFS is the exception:
+//   - device is the name of a ZFS pool, not a device path.
+//   - It starts `zpool scrub` and returns once the scrub has started. It
+//     does not wait for the scrub or report what it finds; read
+//     `zpool status` for that.
+//   - A scrub is not read-only. On a pool with redundancy (mirror, raidz) it
+//     repairs damaged data as it goes.
+//
+// Check reports only success or failure; Repair also reports whether a
+// repair was written and whether the checker asked for a reboot.
 func Check(ctx context.Context, device string, t Type) (CheckResult, error) {
 	res, err := checkDetailed(ctx, device, t, false)
 	return res, errs.At("filesystem", "Check", device, err)
 }
 
-// Repair is Check with repair enabled; Result reports Repaired and RebootRequired where the checker says so. Failures are *CommandError or ErrUnsupported.
+// Repair is Check, except that ext4, xfs and vfat are checked with repair
+// enabled: e2fsck exiting 1 (errors corrected) or 2 (corrected, reboot
+// requested) is success, and vfat repairs that fsck.fat reports by exiting 1
+// are confirmed by a read-only recheck and then count as success.
+// Result.Repaired is set when the checker wrote corrections and the
+// filesystem is now consistent; Result.RebootRequired is set when e2fsck
+// exits with bit 2 set ("errors corrected, system should be rebooted").
+// xfs_repair and zpool scrub report neither, so their results are always
+// zero. ZFS ignores repair; see Check.
+//
+// A failed check is returned as an error: a *CommandError carrying the
+// checker's output for a checker that ran or could not be started, and
+// ErrUnsupported for a type outside Supported().
 func Repair(ctx context.Context, device string, t Type) (CheckResult, error) {
 	res, err := checkDetailed(ctx, device, t, true)
 	return res, errs.At("filesystem", "Repair", device, err)

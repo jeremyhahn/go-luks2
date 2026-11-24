@@ -19,9 +19,36 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/errs"
 )
 
-// cryptsetup's metadata lock (cryptsetup(8)): a flock on /run/cryptsetup/L_<major>:<minor> for block devices, inode-verified and unlinked by the last holder; a file image's lock is the node flock.
+// Interoperating with cryptsetup's metadata lock.
+//
+// The node flock excludes this module's own processes, and nothing else:
+// cryptsetup does not lock the node. MEASURED in the integration devcontainer
+// against cryptsetup 2.7.5 (`cryptsetup --debug` prints each step, and
+// /proc/locks shows the holder):
+//
+//   - For a BLOCK device it flocks /run/cryptsetup/L_<major>:<minor> (decimal
+//     device numbers), LOCK_SH to read the metadata and LOCK_EX to write it,
+//     creating the directory 0700 and the file if they are missing. A flock
+//     held on the device node does not delay it at all; a LOCK_EX held on
+//     that file delays every cryptsetup command on the device, and a
+//     LOCK_SH delays every write.
+//   - Before trusting a lock it compares the inode it locked with the inode
+//     the path names now ("Verifying lock handle"), because the holder that
+//     releases a lock unlinks the file: a waiter that wakes up holding the
+//     unlinked inode has locked nothing and starts again.
+//   - For a REGULAR FILE image it flocks the image itself -- which is
+//     exactly the node flock, so file containers need nothing more.
+//   - The lock is held only while the metadata is read or written.
+//
+// This is cryptsetup's documented locking (cryptsetup(8): --disable-locks;
+// the default locking directory /run/cryptsetup), so the same lock is taken
+// here, the same way.
 
-// OpenLockFileFunc opens (creating) the cryptsetup lock file name inside the open lock directory dir; a parameter so tests can hit the replace window.
+// OpenLockFileFunc opens (creating) the cryptsetup lock file name inside the
+// open lock directory dir. A parameter rather than a package var: the window
+// in which another holder replaces the file between this open and the flock
+// that follows cannot be hit on purpose from a test any other way, and this
+// package holds no mutable state of its own for a caller to substitute.
 type OpenLockFileFunc func(dir *os.File, name string) (*os.File, error)
 
 // DefaultOpenLockFile is the production OpenLockFileFunc.

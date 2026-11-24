@@ -503,7 +503,7 @@ func TestWipeKeyslotAreaRefusesAKeyslotItCannotLocate(t *testing.T) {
 // bareKeyslotsGeometry is the header geometry the bare-image wipe tests stand for: a
 // 16 KiB header area, so the keyslots area starts at 0x8000, running up to end,
 // and no data segment. wipeKeyslotArea confines every wipe to that area
-// (#249, A2), so a test that wipes outside a container still has to say where
+// (A2), so a test that wipes outside a container still has to say where
 // the keyslots area is.
 func bareKeyslotsGeometry(end int64) (*header.BinaryHeader, *header.Metadata) {
 	hdr := &header.BinaryHeader{HeaderSize: header.HeaderMinSize}

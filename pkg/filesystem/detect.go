@@ -26,7 +26,16 @@ func probeOutputRunner(ctx context.Context, name string, args ...string) ([]byte
 	return sys.tools.Output(ctx, name, args...)
 }
 
-// Detect reports the filesystem on device (a path) as blkid -p identifies it, refusing none, several, or a non-filesystem signature with ErrNotDetected.
+// Detect reports the filesystem on device, a device path (not a
+// device-mapper mapping name), as blkid's low-level probe identifies it.
+//
+// It reads the device itself (blkid -p), never blkid's cache, which can
+// describe a device as it was before the last Make.
+//
+// It refuses rather than guesses. Nothing identified, more than one
+// signature, or a signature that is not a filesystem (another LUKS
+// container, swap, a RAID or LVM member) is an error matching
+// ErrNotDetected, naming what was found.
 func Detect(ctx context.Context, device string) (Type, error) {
 	if err := ctx.Err(); err != nil {
 		return "", errs.At("filesystem", "Detect", device, &Error{Kind: err})

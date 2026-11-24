@@ -2,7 +2,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package device owns the LUKS2 device descriptor: pinning, node and cryptsetup locks, the O_EXCL claim, size, and reads past the page cache.
+// Package device owns the LUKS2 device descriptor: pinning a path to an open
+// file, the node flock and cryptsetup's own metadata lock taken on top of it,
+// the O_EXCL claim that proves nothing else holds the device, its size, and
+// reading its medium past the page cache. pkg/luks2 re-exports this
+// package's sentinels and LockTimeoutError by value, so a caller's
+// errors.Is/As is unaffected by where the classification happens to live.
 package device
 
 import (
@@ -20,7 +25,11 @@ var (
 	// device because the process lacks access to it.
 	ErrPermissionDenied = errors.New("luks2: permission denied")
 
-	// ErrInUse indicates an exclusive operation refused a block device something else holds (mounted, mapped, md, or opened O_EXCL).
+	// ErrInUse indicates a destructive or exclusive operation refused a
+	// block device that something else holds: it is mounted, it backs a
+	// device-mapper mapping or an md array, or another process opened it
+	// exclusively. The kernel reports this when the device is opened with
+	// O_EXCL.
 	ErrInUse = errors.New("luks2: the device is in use: it is mounted, mapped, or held open exclusively")
 
 	// ErrChanged indicates that a device path resolved to a different file
@@ -28,10 +37,17 @@ var (
 	// re-pointed in between.
 	ErrChanged = errors.New("luks2: the device path now names a different file than the one locked")
 
-	// ErrCacheStale indicates bytes read through the page cache differ from the same bytes read past it.
+	// ErrCacheStale indicates that bytes read from the device through the
+	// page cache differ from the same bytes read past it: another process
+	// holds the device mapped, or an earlier write failed and left bytes in
+	// the cache that never reached the medium.
 	ErrCacheStale = errors.New("luks2: the device's page cache does not match what is on the medium")
 
-	// ErrUnsupported indicates the device cannot be read past the page cache, so what is on the medium cannot be confirmed.
+	// ErrUnsupported indicates the device cannot be read past the page
+	// cache: O_DIRECT is refused and the device is not on a memory
+	// filesystem (where the cache is the only copy there is), or the
+	// platform has no O_DIRECT at all. What is on the medium therefore
+	// cannot be confirmed, and an operation that needs it confirmed refuses.
 	ErrUnsupported = errors.New("luks2: the device cannot be read past the page cache, so what is on the medium cannot be confirmed")
 
 	// ErrLockContended indicates that a lock on a device could not be taken
@@ -39,7 +55,11 @@ var (
 	// the whole of that budget. See LockTimeoutError.
 	ErrLockContended = errors.New("luks2: device lock is held by another process and did not become available")
 
-	// ErrMetadataLockUnavailable indicates cryptsetup's lock directory is missing, uncreatable, not a directory, a symlink or inaccessible; nothing was read or written.
+	// ErrMetadataLockUnavailable indicates that cryptsetup's metadata lock
+	// for a block device could not be taken at all: its directory
+	// (/run/cryptsetup) is missing and cannot be created, is not a
+	// directory, is a symlink, or does not admit the caller. Nothing was
+	// read or written.
 	ErrMetadataLockUnavailable = errors.New("luks2: cryptsetup's metadata lock for the device cannot be taken")
 )
 
@@ -82,7 +102,10 @@ func (e *LockTimeoutError) Error() string {
 		e.Path, e.Waited, e.Attempts, e.Err, e.Path, e.Path)
 }
 
-// Unwrap reports every LockTimeoutError as ErrLockContended and keeps the underlying errno reachable.
+// Unwrap reports every LockTimeoutError as ErrLockContended -- so a caller
+// can match the sentinel without depending on this type -- and keeps the
+// underlying errno reachable too, so a caller that genuinely wants to know
+// it was EWOULDBLOCK still can.
 func (e *LockTimeoutError) Unwrap() []error {
 	return []error{ErrLockContended, e.Err}
 }

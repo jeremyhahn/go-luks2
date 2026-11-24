@@ -121,7 +121,16 @@ func withTestSys(sys volumeSys) Option {
 	return func(o *options) { o.sys = &sys }
 }
 
-// Volume is a pinned descriptor on one LUKS2 device or file; each method takes and releases its own lock, and mu makes it safe for concurrent use.
+// Volume is a pinned descriptor on one LUKS2 device or file, and nothing
+// else: Open does not require a valid header, because RestorePrimaryHeader
+// and Erase must work on a damaged one. Every method takes the lock it
+// needs, does its I/O and releases the lock; no lock is held between calls.
+//
+// A Volume is safe for concurrent use. flock does not exclude within one
+// open file description, so mu serializes operations here: shared for
+// reads, exclusive for writes. Concurrent readers share one node flock,
+// which the pinned descriptor counts and releases only when the last of
+// them leaves.
 type Volume struct {
 	pinned   *device.Pinned
 	path     string

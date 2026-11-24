@@ -2,7 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package dmcrypt activates a LUKS2 volume through the kernel keyring and device-mapper, rolling back any target it created on failure.
+// Package dmcrypt is activation: the kernel keyring plus device-mapper
+// (root). It is the only way to keep pkg/luks2 rootless and exec-free.
+//
+// Activate calls (*luks2.Volume).Target, which re-reads the header under
+// the volume's own shared lock, re-verifies the key against it -- a key the
+// re-read header does not verify is refused with luks2.ErrWrongKey -- and
+// re-derives the dm-crypt table parameters; it then maps the pinned descriptor's major:minor, never a
+// path. The mapping is a transaction from the moment its create ioctl
+// succeeds: every failure after that point rolls the target back, under a
+// cancellation-proof context and its own clock budget, so a canceled
+// caller never leaves a plaintext device behind.
 package dmcrypt
 
 import (
@@ -251,7 +261,12 @@ func rollback(ctx context.Context, name, uuid string, devNo uint64) error {
 	return nil
 }
 
-// Deactivate closes a device-mapper mapping; the keyring entry was already released at activation.
+// Deactivate closes a device-mapper mapping.
+//
+// There is deliberately nothing keyring-related here: the entry holding
+// the volume key is released as soon as the activation ioctl returns, not
+// kept for the mapping's lifetime, so by the time anything can be closed
+// there is nothing left to release.
 func Deactivate(ctx context.Context, name string) error {
 	const op = "Deactivate"
 	if err := ctxErr(ctx); err != nil {

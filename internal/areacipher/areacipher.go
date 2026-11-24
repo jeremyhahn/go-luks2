@@ -2,7 +2,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package areacipher is the AES-XTS/CBC cipher over a LUKS2 keyslot area; plaintext goes into an enclave, and stdlib round keys stay on the heap (residual).
+// Package areacipher is the cipher over a LUKS2 keyslot area: AES in XTS or
+// CBC mode, sector by sector, with the IV generators cryptsetup writes.
+//
+// The plaintext of a keyslot area is the AF stripes, which are the master key
+// spread wide, so the decrypting direction writes straight into an enclave the
+// caller's custody allocates. The ciphertext is ordinary memory on purpose:
+// those bytes are what is on the device, byte for byte, and locking a copy of
+// something already public only doubles the RLIMIT_MEMLOCK an operation needs.
+//
+// RESIDUAL EXPOSURE (internal/secret, entry 4): x/crypto/xts and crypto/aes
+// hold the expanded AES round keys on the ordinary heap for the life of the
+// cipher and offer no way to place them elsewhere or wipe them. A round-key
+// schedule is a deterministic expansion of the key, so recovering it recovers
+// the key. Nothing this package can do closes that; it is the stdlib crypto
+// boundary.
 package areacipher
 
 import (
@@ -60,7 +74,10 @@ type Transform struct {
 	fips fips.Mode // see WithFIPS
 }
 
-// WriteSpec is the only area encryption this module writes: AES-XTS on the 64-bit sector index, independent of the data cipher.
+// WriteSpec is the ONLY area encryption this module writes to a keyslot:
+// AES-XTS tweaked on the 64-bit sector index. It is deliberately not the
+// container's DATA cipher, which describes the data segment and says nothing
+// about how keyslots are wrapped.
 const WriteSpec = "aes-xts-plain64"
 
 // Default is the transform WriteSpec names: the one every keyslot this module
@@ -85,7 +102,42 @@ var transforms = map[string]Transform{
 	specCBCPlain:   {mode: modeCBC, iv: ivPlain},
 }
 
-// Parse reads area.encryption as an exact spec from a closed set (aes-xts-plain64, aes-xts-plain, aes-cbc-essiv:sha256, aes-cbc-plain64, aes-cbc-plain) and reports its transform.
+// Parse reads a keyslot's area.encryption as the full cipher spec it is --
+// "<algorithm>-<mode>-<iv>" -- and reports the transform it names, and
+// whether this module can run it.
+//
+// # The mode is consumed, not discarded
+//
+// Running AES-XTS whatever the header said would let a keyslot declaring
+// "aes-cbc-essiv:sha256" over XTS material open here and in no conforming
+// implementation. Honoring the mode on read is what makes a
+// wrong declaration a test failure instead of a container only this library
+// can open: such a keyslot is now decrypted as the CBC it claims, fails its
+// digest as it does in cryptsetup, and a genuine CBC keyslot opens.
+//
+// # The accepted set is exact and closed
+//
+// It is an enumeration of the area transforms cryptsetup writes for AES, not a
+// grammar:
+//
+//	aes-xts-plain64       the default of this module and of cryptsetup
+//	aes-xts-plain         --keyslot-cipher, and carried over from LUKS1
+//	aes-cbc-essiv:sha256  LUKS1's long-time default, kept by `cryptsetup
+//	                      convert`, and what cryptsetup writes for a volume
+//	                      formatted with that data cipher
+//	aes-cbc-plain64       --keyslot-cipher, or a data cipher of that name
+//	aes-cbc-plain
+//
+// "plain" truncates the sector index to 32 bits, "plain64" does not; the two
+// differ only for a sector index of 2^32 or more, and a keyslot area's
+// decrypted length is bounded at about 4 MiB by header validation, so for
+// every keyslot that is admitted they name the same bytes.
+//
+// Everything else is refused: another algorithm, another mode or IV generator
+// (ecb, lrw, benbi, plain64be, null, essiv over XTS), a spec with the mode
+// missing, and any other casing or decoration. Matching is exact because the
+// kernel's crypto API names are case-sensitive and cryptsetup passes them
+// through unchanged.
 func Parse(spec string) (Transform, bool) {
 	t, ok := transforms[spec]
 	return t, ok
@@ -116,7 +168,10 @@ func (t Transform) ValidateKeySize(n int) error {
 	}
 }
 
-// SectorSize is the 512-byte sector a keyslot area is transformed in; the sector index from the area start is the IV or tweak.
+// SectorSize is the sector a keyslot area is transformed in. It is a property
+// of the LUKS2 format -- key material is always processed in 512-byte
+// sectors, independent of the data segment's sector size -- and the sector
+// index, counted from the start of the area, is the IV or tweak.
 const SectorSize = 512
 
 // run transforms src into dst in sectorSize sectors. Scratch for a trailing
@@ -133,7 +188,12 @@ func (t Transform) run(c secret.Custody, dst, src, key []byte, sectorSize int, d
 	return cbcSectors(t.iv, dst, src, key, sectorSize, dir)
 }
 
-// WithFIPS returns t bound to FIPS mode m, which refuses an AES-XTS key with equal halves (SP 800-38E).
+// WithFIPS returns t bound to FIPS mode m. In FIPS 140-3 mode an AES-XTS key
+// whose two halves -- the data key and the tweak key -- are equal is refused
+// in both directions, as SP 800-38E and FIPS 140-3 IG C.I require and as the
+// kernel's xts_verify_key does. Outside FIPS mode such a key is still used,
+// again as the kernel does, so a container that opens under cryptsetup opens
+// here.
 func (t Transform) WithFIPS(m fips.Mode) Transform {
 	t.fips = m
 	return t
@@ -152,7 +212,10 @@ func (t Transform) requireXTSKey(key []byte) error {
 	return nil
 }
 
-// EncryptEnclave encrypts enclave-held key material with an enclave-held key and returns ordinary-memory ciphertext.
+// EncryptEnclave encrypts AF-split key material held in an enclave with a key
+// held in an enclave, borrowing both for the duration of the transform and no
+// longer, and returns the ciphertext as ordinary memory (see the package
+// documentation for why).
 func (t Transform) EncryptEnclave(c secret.Custody, data, key enclave.ByteAccess) ([]byte, error) {
 	plainLen := data.Size()
 	paddedLen := plainLen
@@ -199,7 +262,14 @@ func (t Transform) EncryptEnclave(c secret.Custody, data, key enclave.ByteAccess
 	return encrypted, nil
 }
 
-// DecryptEnclave decrypts keyslot ciphertext straight into an enclave c allocates, since the plaintext is the master key.
+// DecryptEnclave decrypts keyslot material read off the device into an
+// enclave c allocates, with the key borrowed from its own enclave.
+//
+// The direction is what makes this necessary: the plaintext is the AF
+// stripes, which are the master key, so it may not be produced onto the
+// ordinary heap even transiently. The destination enclave is allocated first
+// and the cipher writes straight into its locked pages. data is ciphertext
+// read from the device and is deliberately NOT enclaved.
 func (t Transform) DecryptEnclave(c secret.Custody, data []byte, key enclave.ByteAccess) (enclave.ByteAccess, error) {
 	if len(data) == 0 {
 		return nil, &errs.Error{Kind: errs.ErrInvalidArgument, Detail: "no key material to decrypt"}
@@ -223,7 +293,14 @@ func (t Transform) DecryptEnclave(c secret.Custody, data []byte, key enclave.Byt
 	return plaintext, nil
 }
 
-// ValidateXTSKeySize reports whether a key of this length can key AES-XTS: 32, 48 or 64 bytes.
+// ValidateXTSKeySize reports whether a key of this length can key AES-XTS.
+//
+// XTS splits its key in half and gives each half to AES, so the length must be
+// twice a legal AES key size: 32, 48 or 64 bytes. xts.NewCipher refuses
+// anything else -- which means a keyslot declaring "key_size": 40 is
+// well-formed by every other measure and can never yield a master key. That is
+// exactly the shape a removal guard must not count, and it could not see it
+// while the rejection lived only inside the cipher constructor.
 func ValidateXTSKeySize(n int) error {
 	switch n {
 	case 32, 48, 64:
@@ -236,7 +313,11 @@ func ValidateXTSKeySize(n int) error {
 	}
 }
 
-// ValidateVolumeKeySize reports whether n bytes keys an AES data cipher (16, 24, 32, or XTS 32, 48, 64); dm-integrity keys are refused.
+// ValidateVolumeKeySize reports whether a volume key of n bytes keys an AES
+// data cipher: one AES key (16, 24 or 32 bytes, CBC and the like) or two
+// (32, 48 or 64, XTS). The volume key of a dm-integrity volume also carries
+// the integrity key, and is refused here; such a volume is not activated
+// either.
 func ValidateVolumeKeySize(n int) error {
 	switch n {
 	case 16, 24, 32, 48, 64:
@@ -249,7 +330,11 @@ func ValidateVolumeKeySize(n int) error {
 	}
 }
 
-// WritableAreaKeySize is n when n keys AES-XTS, otherwise 64 (AES-256-XTS, cryptsetup's fallback).
+// WritableAreaKeySize is the area key size a keyslot this module writes uses
+// for a volume key of n bytes: n itself when it keys AES-XTS, so the keyslot
+// is wrapped as strongly as the data, and otherwise 64 -- AES-256-XTS, the
+// keyslot cipher cryptsetup falls back to for a volume key its default cannot
+// take (DEFAULT_LUKS2_KEYSLOT_KEYBITS).
 func WritableAreaKeySize(n int) int {
 	if ValidateXTSKeySize(n) == nil {
 		return n

@@ -24,14 +24,49 @@ import (
 type DetachState int
 
 const (
-	// Released means the device was observed no longer backed by its file.
+	// Released means the release was OBSERVED: the device is no longer
+	// backed by the file it held.
 	Released DetachState = iota
 
-	// Deferred means the kernel accepted the request but another holder keeps the device open; autoclear releases it later. A success, as for losetup -d.
+	// Deferred means the kernel accepted the request and postponed it
+	// because something else still has the device open -- a mounted
+	// filesystem, or a dm-crypt mapping built on it. The device carries the
+	// autoclear flag and will be released when the last user goes away.
+	//
+	// This is a SUCCESS. It is what `losetup -d` does on a busy device, and
+	// reporting it as a failure would tell a caller their detach did not
+	// work when in fact it did and is simply pending.
 	Deferred
 )
 
-// Detach detaches the device and waits until the release is observed, returning [Deferred] if still held at the bound; refuses with [ErrDeviceReassigned] a device no longer backed by its original file.
+// Detach detaches the device and waits until the release is OBSERVED before
+// returning.
+//
+// That is the promise callers have always read into it, and it holds in
+// every case but one. If something else still holds the device when the
+// wait's bound expires -- a mounted filesystem, a dm-crypt mapping -- the
+// kernel has accepted the request and will complete it when the last user
+// goes away, and this returns [Deferred] with the device still attached.
+// That case is a success: it is what `losetup -d` reports for a busy
+// device, and failing it would break callers detaching something
+// legitimately still in use.
+//
+// The wait is the point. LOOP_CLR_FD does not necessarily tear the
+// association down before it returns: while any descriptor for the device
+// is still open the kernel marks it autoclear and defers the release until
+// the last reference is dropped. So the ioctl can report success before a
+// caller that immediately asks [Find] whether the file is still attached
+// could be told that it is -- intermittently, depending on whether the
+// kernel had got there yet. A deferred release is not an early exit: the
+// wait keeps looking, because a holder is usually momentary and waiting
+// turns most deferred cases into observed releases.
+//
+// The device is detached only while it is still backed by the file it was
+// backed by when this Device was obtained -- the same device and inode, read
+// with LOOP_GET_STATUS64 on the descriptor LOOP_CLR_FD is then sent on. A
+// device since released and attached to another file is refused with
+// [ErrDeviceReassigned], and one with nothing attached any more with an
+// error matching ErrIO; neither is touched.
 func (d *Device) Detach(ctx context.Context) (DetachState, error) {
 	state, err := detachDevice(ctx, d.path, d.ident, d.sys, d.sys.readState)
 	return state, errs.At("loop", "Device.Detach", d.path, err)

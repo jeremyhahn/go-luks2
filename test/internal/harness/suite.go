@@ -13,20 +13,38 @@ import (
 	"time"
 )
 
-// Suite is one integration test process's ledger participation: it holds the run's record, points TMPDIR at a run-owned directory, and reaps dead runs.
+// Suite is one integration test process's participation in the ledger: it holds
+// the run's record open, points TMPDIR at a directory the run owns, and reaps
+// what previous runs left behind.
+//
+// It exists because the separate test processes (pkg/luks2 and each
+// test/integration/<package> directory) need identical setup, and setup copied
+// into each of them is setup that drifts in all but one.
 type Suite struct {
 	Ledger  *Ledger
 	TempDir string
 	RunID   string
 
-	// Scope identifies the container, shared by its test binaries (see volumename.go).
+	// Scope identifies the CONTAINER rather than this process, so the three
+	// test binaries that run inside one container agree on it and two
+	// containers never do. See volumename.go for why a name needs both terms.
 	Scope string
 
-	// Remover is the kernel side of Finish; a field so tests can reach it.
+	// Remover is the kernel side of Finish. It is a field rather than a
+	// hardcoded SystemRemover because Finish is where the measured defect
+	// LIVED -- it trusted the exit code -- and a path that has already been
+	// wrong once must be reachable by a test.
 	Remover Remover
 }
 
-// BeginSuite opens the ledger, records a temp root before pointing TMPDIR at it, then reaps the ledgers of dead runs.
+// BeginSuite prepares a run: it opens the ledger, creates and RECORDS a temp
+// root before anything can allocate in it, points TMPDIR there, and reaps the
+// ledgers of runs that are already dead.
+//
+// The order is deliberate. The temp root is recorded before TMPDIR points at
+// it, so there is no instant at which the suite could allocate a backing file
+// somewhere unrecorded. The reap comes last, after this run has its own id, so
+// it cannot mistake this run's ledger for a stale one.
 func BeginSuite(w io.Writer) (*Suite, error) {
 	stateDir := StateDir()
 	runID := NewRunID(os.Getpid(), time.Now().UnixNano())
@@ -94,7 +112,37 @@ func verifyAllocationsLandUnder(root string) error {
 	return nil
 }
 
-// Finish removes what this run recorded and left, keeps the ledger if anything is outstanding, and returns the exit code to use (a cleanup failure makes a clean run 1).
+// Finish closes out the run: it removes what this run recorded and left behind,
+// and discards the ledger only if nothing is outstanding.
+//
+// # A passing run is not evidence of a clean host
+//
+// An earlier version discarded the ledger whenever the tests passed. That is
+// wrong in the most expensive way: on a privileged CI runner pkg/luks2 reported `ok` in 87.6s while TestLoopDeviceCleanup left
+// /dev/loop1 attached. Finish saw exit 0, discarded the ledger and deleted the
+// temp root, destroying the only record of the device the run had just leaked.
+// The next run then reaped a ledger describing nothing and honestly reported
+// "1 already gone" while the device sat on the host.
+//
+// That is the failure shape this repository keeps meeting: the danger path is
+// the one that looks like normal completion. A green suite and a leaked device
+// are not mutually exclusive, and the exit code cannot tell them apart.
+//
+// So the record is checked against the HOST rather than against the verdict.
+// Whatever this run recorded and has not cleaned up is removed here, by exactly
+// the same identity rules the cross-run reaper uses, and the ledger survives
+// unless there is nothing left outstanding.
+//
+// # It returns the exit code the process must use
+//
+// A cleanup failure FAILS THE RUN. An earlier version logged and returned, so a
+// green suite that could not remove its own dm mapping still exited 0 -- CI
+// reported success while the host kept the state and the ledger. That is the
+// fail-open path this whole harness exists to close, reintroduced at the last
+// step of it.
+//
+// A non-zero test result is preserved as-is; a clean run whose cleanup failed
+// becomes 1. The caller must exit with what this returns.
 func (s *Suite) Finish(code int, w io.Writer) int {
 	report, err := ReapOwn(s.Ledger, s.Remover, w)
 	if err != nil {

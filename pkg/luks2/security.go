@@ -210,7 +210,18 @@ type deviceLock struct {
 	locked *device.Locked
 }
 
-// DefaultLockWait is the most acquireDeviceLock waits for a competing holder.
+// DefaultLockWait is what acquireDeviceLock spends before giving up. It is a
+// BOUND, not a target: an uncontended lock is taken on the first attempt and
+// costs nothing, and the budget is consumed only when another holder has the
+// device.
+//
+// 30s is chosen against the thing actually being waited for. The longest lock
+// hold in this library is a format, whose cost is dominated by the KDF -- and
+// the KDF is calibrated to a caller-supplied time, defaulting to 2000ms per
+// derivation. A budget of 30s therefore absorbs a normal format several times
+// over while still terminating a genuine deadlock in a time an operator will
+// sit through. Below about 5s it would start refusing ordinary contention,
+// which is the failure this replaces.
 const DefaultLockWait = device.DefaultLockWait
 
 // The backoff a device lock wait uses, as internal/device.Lock does it.

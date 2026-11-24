@@ -20,7 +20,7 @@ import (
 // encoding/json binds a member to a struct field case-insensitively and lets
 // the last duplicate win; cryptsetup's json-c is case-sensitive. A header that
 // spells a modeled member twice, or in another case, reads one way here and
-// another way to cryptsetup (#248, B6).
+// another way to cryptsetup (B6).
 
 // writeHeaderJSON replaces path's JSON area, in both copies, with jsonData,
 // checksummed: a header whose bytes no writer of this package could produce.

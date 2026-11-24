@@ -15,7 +15,15 @@ import (
 
 // Per-keyslot geometry validation: every failure wraps ErrInvalidKeyslot so the scan skips only that slot; limits match cryptsetup 2.7.0.
 const (
-	// MaxKeyslotKeySize is the largest volume key, in bytes, accepted from a keyslot: sixteen times XTS's 64.
+	// MaxKeyslotKeySize is the largest volume key, in BYTES, this package will
+	// accept from a keyslot read off a device.
+	//
+	// cryptsetup 2.7.0 will not FORMAT a volume with anything but a 256- or
+	// 512-bit key in XTS mode -- it refuses outright with "Key size in XTS mode
+	// must be 256 or 512 bits" -- so 64 bytes is the largest key it writes, and
+	// XTS is the only mode this package implements. This is sixteen times that,
+	// which leaves room for a mode or a cipher with a larger key without
+	// leaving room for an attack.
 	MaxKeyslotKeySize = 1024
 
 	// MaxKeyslotAreaSize bounds how much of the device a single keyslot may
@@ -27,7 +35,25 @@ const (
 	MaxKeyslotStripes = AFStripes
 )
 
-// ValidateKeyslot makes one keyslot's metadata safe to act on; non-luks2 types get only the general limits; id may be empty.
+// ValidateKeyslot checks one keyslot's declared geometry, and is called for
+// every keyslot as the metadata is parsed.
+//
+// Its job is to make the metadata SAFE TO ACT ON: nothing downstream should
+// have to re-establish that a field is present, parses, or describes an amount
+// of work worth doing. It is not a check that the keyslot will open -- that is
+// the passphrase's job, and a keyslot may be perfectly well-formed and simply
+// hold a credential nobody has.
+//
+// Keyslot types other than "luks2" are checked only against the limits that
+// apply to any keyslot. LUKS2 defines a "reencrypt" type alongside "luks2"; it
+// carries no anti-forensic object and its area is a checksum region rather than
+// raw key material, so imposing the luks2 rules on it would make a container in
+// the middle of a reencryption unreadable -- including by GetVolumeInfo, which
+// is exactly what an operator reaches for when something is wrong.
+//
+// The id names the keyslot in every message. It may be empty, for a keyslot
+// reached by something other than its position in the header -- the phrasing
+// degrades to "a keyslot" rather than to `keyslot ""`.
 func ValidateKeyslot(id string, keyslot *Keyslot) error {
 	label := "a keyslot"
 	if id != "" {
@@ -140,7 +166,11 @@ const (
 	MaxArgon2Parallel = kdf.MaxArgon2Parallel
 )
 
-// ToKDFParams copies k's fields into a kdf.Params, salt as the stored base64; callers check k for nil.
+// ToKDFParams copies k's fields into a kdf.Params. Salt is carried as the
+// stored base64 string, so this conversion cannot fail: only the derive path
+// decodes it, and a cost-only caller (ValidateKDFCost, DerivationWork) never
+// touches it at all. Callers check k for nil themselves, matching each
+// original function's own nil handling.
 func ToKDFParams(k *KDF) kdf.Params {
 	return kdf.Params{
 		Type:       k.Type,
@@ -153,7 +183,15 @@ func ToKDFParams(k *KDF) kdf.Params {
 	}
 }
 
-// ValidateKDFCost checks what running this KDF would cost; the error is unclassified so each caller wraps its own sentinel.
+// ValidateKDFCost checks what running this KDF would cost, before any of it is
+// spent.
+//
+// It returns an UNCLASSIFIED error on purpose. The same excessive cost means
+// different things depending on where the KDF came from -- a keyslot's own KDF
+// makes that keyslot unusable, a digest's makes that digest unusable -- and only
+// the caller knows which. Each caller wraps the sentinel that routes an operator
+// to the right remedy; classifying here would force one answer on both and
+// misattribute the other.
 func ValidateKDFCost(k *KDF) error {
 	if k == nil {
 		return &errs.Error{Kind: errs.ErrInvalidHeader, Detail: "no KDF object"}

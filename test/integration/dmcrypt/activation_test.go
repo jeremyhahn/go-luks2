@@ -119,7 +119,7 @@ func openAndUnlock(t *testing.T, device string, passphrase []byte) (*luks2.Volum
 }
 
 // activateRecorded is dmcrypt.Activate with the mapping recorded in the run
-// ledger before it is created (#96, #348), so a run that dies at any point
+// ledger before it is created, so a run that dies at any point
 // after still leaves an entry a later run's reaper can remove. A record failure
 // refuses the activation; a mapping live under an identity other than the
 // recorded one is deactivated rather than left unattributable.

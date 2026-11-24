@@ -71,16 +71,30 @@ func (h *Header) Dropped() []DroppedEntry { return h.metadata.DroppedNullEntries
 // its JSON metadata area, in bytes.
 func (h *Header) Size() int64 { return int64(h.hdr.HeaderSize) } // #nosec G115 -- bounded by header.HeaderMaxSize (4 MiB), far under int64's range
 
-// Offset is where this copy was read: 0 for the primary, the header area size for the secondary.
+// Offset is where this header copy was read: 0 for the primary, the header
+// area size for the secondary. (*Volume).Header returns the current copy,
+// which is the secondary when the primary is damaged or older, so Offset is
+// how a caller tells which one it has.
 func (h *Header) Offset() int64 { return int64(h.hdr.HeaderOffset) } // #nosec G115 -- the read refuses an hdr_offset other than the copy's own location, at most header.HeaderMaxOffset
 
-// Keyslots lists the volume's keyslots in ascending id order, each with its Priority.
+// Keyslots lists the volume's keyslots in ascending id order, each with its
+// Priority; Unlock tries them by priority within that order (see Priority).
+// It shares listKeyslotsFrom with the old ListKeyslots, so the two
+// never report a different shape for one container.
 func (h *Header) Keyslots() []KeyslotInfo {
 	slots, _ := listKeyslotsFrom(h.metadata)
 	return slots
 }
 
-// Segments lists the data segments in ascending id order; a non-decimal id is omitted and an unparseable field reads as zero.
+// Segments lists the volume's data segments, in ascending id order. A
+// segment whose id does not parse as a decimal integer is omitted: the same
+// tolerance (*Header).Keyslots already applies to a keyslot cryptsetup
+// itself could never address (see listKeyslotsFrom) -- no LUKS2
+// implementation reaches such a segment either, so reporting nothing about
+// it is more honest than inventing an id. A segment field that fails to
+// parse (a malformed offset, size or iv_tweak) reads back as its zero value
+// rather than failing the whole listing: Segments, like Keyslots, is an
+// inspection operation and must report what is there.
 func (h *Header) Segments() []Segment {
 	var out []Segment
 	for _, idStr := range header.SortedIDs(h.metadata.Segments) {
@@ -115,7 +129,12 @@ func (h *Header) Segments() []Segment {
 	return out
 }
 
-// Tokens returns every token keyed by its canonical slot id; a non-canonical key is omitted.
+// Tokens returns every token the header carries, converted to the Token
+// value shape, keyed by its canonical slot id. A map key that is not the
+// canonical spelling of a slot 0..MaxTokens-1 -- "01", "-1", "999" --
+// addresses no token in any LUKS2 implementation (cryptsetup included) and is omitted rather than reported, the same tolerance
+// Keyslots and Segments already give a malformed entry: a listing is an
+// inspection operation.
 func (h *Header) Tokens() map[int]Token {
 	out := make(map[int]Token, len(h.metadata.Tokens))
 	for idStr, lt := range h.metadata.Tokens {
@@ -147,7 +166,11 @@ func trimmedField(b []byte) string {
 	return string(bytes.TrimRight(b, "\x00"))
 }
 
-// Header reads the current header copy (valid, higher sequence id) under the shared lock; with none it fails with ErrNotLUKS2 or ErrInvalidHeader.
+// Header reads the current header copy -- the valid one with the higher
+// sequence id, as cryptsetup chooses (readCurrentHeader) -- under the shared
+// lock. It does not require a valid header to have been written yet by
+// anything other than Format -- with no valid copy it fails with ErrNotLUKS2
+// or ErrInvalidHeader, same as the old ReadHeader.
 func (v *Volume) Header(ctx context.Context) (*Header, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
@@ -189,7 +212,11 @@ func (v *Volume) SecondaryHeader(ctx context.Context) (*Header, error) {
 	return &Header{hdr: hdr, metadata: metadata}, nil
 }
 
-// RestorePrimaryHeader rewrites the primary from the secondary under the exclusive lock, refusing with ErrPrimaryHeaderCurrent when the primary is intact and at least as new.
+// RestorePrimaryHeader rewrites the primary header copy from the secondary
+// one, under the exclusive lock, refusing with ErrPrimaryHeaderCurrent when
+// the primary is intact and at least as new -- restoring it would roll the
+// volume back rather than repair it. ReplacePrimaryHeader skips that
+// refusal.
 func (v *Volume) RestorePrimaryHeader(ctx context.Context) error {
 	return v.restorePrimaryHeader(ctx, "Volume.RestorePrimaryHeader", false)
 }

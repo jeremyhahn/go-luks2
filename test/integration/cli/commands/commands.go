@@ -2,7 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package commands holds the CLI parity table, one entry per verb internal/cli's registry answers to; it is data with no build tag or device dependency.
+// Package commands holds the CommandDefinition/ArgDefinition table
+// the CLI parity suite is checked against: one entry per verb
+// internal/cli's registry answers to, crossed by test/integration/cli's own
+// runner against the columns {CLI binary, embedded}. It carries no build
+// tag and no dependency on internal/cli or pkg/luks2 -- the table is data,
+// so that nothing about running it requires root or a real device; only
+// the runner and the enumerating test that reads it do.
+//
+// The table grows with internal/cli's registry: it holds exactly the verbs
+// the registry answers to, and the enumerating test fails when it falls
+// behind.
 package commands
 
 // ArgDefinition is one positional argument a command takes, in order.

@@ -2,7 +2,29 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command releasability-gate (make releasability) fails on a fleet address, hostname or owner path, or an unpublishable file, in the git index; exit 0 publishable, 1 findings, 2 could not run.
+// Command releasability-gate is the public-releasability gate. It reads
+// every entry in the git index of the checkout it is given -- the staged
+// content, not the working tree, because the index is what the next commit
+// carries -- and fails on a fleet address, hostname or owner path in any of
+// them, and on any tracked file the public release must not carry.
+//
+// It is a command and not a test because it needs the git index, and this
+// module's package tests also run where there is none: the integration image
+// excludes .git/ and runs `go test -tags=integration ./...`. Run it through
+// `make releasability`, which `make ci` and the CI workflow both call.
+//
+// Exit status: 0 the tree has no finding -- publishable; the strip-at-publish
+// files it lists (labstrings.DefaultStripAtPublish) are excluded from every
+// archive of it by .gitattributes -- 1 it is not (the report says why; a
+// strip-at-publish file .gitattributes does not export-ignore is a finding),
+// 2 the gate could not run -- a missing or extra argument, a root that is not
+// a git checkout, an export-ignore attribute git could not report, an
+// unusable releasability-exempt.txt, or an index entry it
+// could not read in full (a blob over the scan limit that the exemption list
+// does not name, one missing from the object store, or an I/O failure). A
+// tree the gate could not list is never reported clean, and the only entry it
+// passes without reading -- an oversize file the staged exemption list names
+// with a reason -- is printed as NOT READ on every run.
 package main
 
 import (

@@ -682,7 +682,13 @@ func validateJSONSizeStructure(hdrSize int, metadata *Metadata) error {
 	return nil
 }
 
-// LegalHeaderAreaSizes returns the powers of two from HeaderMinSize to HeaderMaxSize, which are also the legal secondary header offsets.
+// LegalHeaderAreaSizes returns the header area sizes LUKS2 admits, ascending:
+// the powers of two from HeaderMinSize to HeaderMaxSize.
+//
+// The list doubles as the list of legal secondary header offsets, because the
+// second copy starts where the first one ends. It is generated rather than
+// written out so that the two constants remain the only place the range is
+// stated.
 func LegalHeaderAreaSizes() []int64 {
 	var sizes []int64
 	for size := int64(HeaderMinSize); size <= HeaderMaxSize; size *= 2 {

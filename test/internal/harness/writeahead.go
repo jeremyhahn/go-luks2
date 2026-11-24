@@ -14,7 +14,20 @@ import (
 // its terminating NUL. pkg/dmcrypt cuts at the same length.
 const dmUUIDMaxLength = 128
 
-// MappingUUID is the dm UUID cryptsetup and dmcrypt.Activate give a mapping, so it can be recorded before it exists; CheckRecordedMapping checks it.
+// MappingUUID is the dm UUID a mapping gets when the LUKS2 container whose
+// header UUID is headerUUID is activated under name:
+// "CRYPT-LUKS2-<header uuid without dashes>-<name>", cut to the kernel's
+// length. It is cryptsetup's format, and dmcrypt.Activate follows it, so one
+// derivation covers a mapping either of them creates.
+//
+// It exists so a mapping can be recorded BEFORE it exists. Recording
+// what an activation returned leaves a window in which the mapping is on the
+// host and in no ledger; when the activation runs in another process -- a
+// FIPS child, cryptsetup -- that window lasts until the parent sees the child
+// exit, and a canceled run dies in it. Being a copy of the derivation, it is
+// checked against the live mapping after every activation that relies on it
+// (CheckRecordedMapping), so a drift fails the run that introduced it instead
+// of leaving a mapping the reaper will not touch.
 func MappingUUID(headerUUID, name string) string {
 	uuid := "CRYPT-LUKS2-" + strings.ReplaceAll(headerUUID, "-", "") + "-" + name
 	if len(uuid) > dmUUIDMaxLength {
@@ -65,7 +78,16 @@ func CheckRecordedMapping(rm Remover, name, recorded string) error {
 	return nil
 }
 
-// ActivateRecordedAhead records the mapping in l, runs activate, then checks the live mapping; activate's error is returned as is.
+// ActivateRecordedAhead runs activate, which maps device as name, with the
+// mapping recorded in l before activate starts, then checks the live
+// mapping against that record. Recording what activate created once it has
+// returned is too late: a run killed in between leaves a mapping no ledger
+// attributes, and the next run's reaper refuses the host.
+//
+// An error from activate is returned as it is, so a caller can still tell a
+// refused activation by its sentinel. If the check fails the mapping exists
+// under an identity the reaper will not match; removing it is the caller's
+// job, since this package does not activate anything itself.
 func (l *Ledger) ActivateRecordedAhead(rm Remover, device, name string, activate func() error) error {
 	uuid, err := l.RecordMappingAhead(device, name)
 	if err != nil {

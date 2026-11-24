@@ -17,7 +17,32 @@ import (
 	"github.com/jeremyhahn/go-luks2/internal/secret"
 )
 
-// CheckKeyring verifies this process can place and release a volume key in the kernel keyring, returning Activate's error if not; call it at startup.
+// CheckKeyring verifies that this process can actually place a volume key
+// in the kernel keyring, and returns the same typed, actionable error
+// Activate would return if it cannot.
+//
+// # Why a preflight exists
+//
+// Activate fails closed when the keyring is unavailable, which is the
+// right answer to the wrong question if it is asked for the first time
+// halfway through a shift. The condition it detects -- a container started
+// without the keyring syscalls -- is fixed at boot and cannot change
+// afterwards, so discovering it at the first activation of a customer
+// volume converts a configuration error into an outage. Calling this at
+// startup converts it back: the process refuses to come up, and the error
+// names the syscalls and the remedy.
+//
+// Long-lived consumers (a storage daemon, a node agent) should call it
+// during initialization. It is cheap -- one add and one release of a
+// 64-byte probe -- and it exercises the same syscalls, key type and ring
+// resolution that an activation does, including the release path, so a
+// kernel that can add but not revoke is caught here too rather than at
+// teardown.
+//
+// A nil return is not a promise that a later activation will succeed; the
+// quota can still be exhausted between the two. It is a promise that the
+// syscalls are reachable, which is the failure this exists to move
+// earlier.
 func CheckKeyring(ctx context.Context) error {
 	const op = "CheckKeyring"
 	if err := ctxErr(ctx); err != nil {

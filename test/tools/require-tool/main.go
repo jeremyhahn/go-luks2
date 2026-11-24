@@ -2,7 +2,49 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command require-tool makes a Go analysis tool available at an exact pinned version, asserting its self-reported version, or fails the CI job.
+// Command require-tool makes a Go analysis tool available at an EXACT pinned
+// version, or fails the CI job. .github/workflows/ci.yml runs it before every
+// step that lints or scans:
+//
+//	go run ./test/tools/require-tool <binary> <pin> <module-path> [go-install args...]
+//
+// It replaces .github/require-tool.sh, because the public release ships no
+// shell scripts. Its behavior is the script's.
+//
+// # Why this exists
+//
+// Installing tools at job time is unreliable: runner job containers
+// use host networking, and on hosts that resolve an AAAA record for
+// sum.golang.org with no default IPv6 route, Go's v6-to-v4 fallback sometimes
+// does not complete — more often on a loaded runner. Every Lint and Security
+// Scan leg was exposed. The tools are now baked into the self-hosted runner
+// image at pinned versions, so on that host this command performs no network
+// access at all.
+//
+// Pinning alone was never enough for gosec: it takes its version string
+// from ldflags rather than from the module path, so `go install ...@v2.29.0`
+// still self-reports `dev` — which is how `make security` came to print
+// `Gosec : dev`, meaning results could not be attributed to a scanner version
+// and two runs of one commit could disagree. The ASSERTION is therefore the
+// deliverable, not the pin: whatever the binary is and wherever it came from,
+// this refuses to continue unless it SAYS it is the pinned version.
+//
+// FAIL-CLOSED, in every direction:
+//
+//   - A tool missing on a self-hosted runner is an IMAGE defect. It is not
+//     quietly papered over with a network install, because doing so would
+//     restore precisely the flake this removes while reporting success.
+//   - A tool whose self-report does not match the pin fails, rather than
+//     scanning with an unknown version and calling the result a gate.
+//   - A version that cannot be READ AT ALL fails. An unreadable self-report is
+//     not evidence of a matching version.
+//
+// The github.com fallback is deliberate and narrow: the public host runs the
+// same workflow file on GitHub-hosted runners, where no image of ours exists and
+// there is nothing to bake into. It is the only path here that touches the
+// network, and it still has to satisfy the same assertion afterwards. gosec is
+// built there the way the devcontainer image builds it, against the pin file's
+// golang.org/x/tools (see install).
 package main
 
 import (

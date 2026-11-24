@@ -17,11 +17,36 @@ import (
 // Crypt segment validation: sector_size, iv_tweak and encryption go straight to a device-mapper ioctl, so they are checked when the header is read (limits per cryptsetup 2.7.0).
 
 const (
-	// MaxSegmentEncryptionLength bounds the cipher specification a header may hand to a kernel ioctl.
+	// MaxSegmentEncryptionLength bounds the cipher specification a header may
+	// hand to a kernel ioctl.
+	//
+	// The charset check is the load-bearing half; this is the other one. An
+	// unbounded string out of an untrusted header has no business reaching a
+	// kernel interface whatever it contains.
+	//
+	// 128 is comfortably above anything the format can express. The longest
+	// spelling LUKS2 permits is the kernel-crypto-API form --
+	// "capi:authenc(hmac(sha256),xts(aes))-plain64", 43 bytes -- and the
+	// ordinary form this package and cryptsetup write,
+	// "aes-xts-plain64"/"aes-cbc-essiv:sha256", is 15 to 20.
 	MaxSegmentEncryptionLength = 128
 )
 
-// SegmentSectorSizes maps each accepted crypt-segment sector size (cryptsetup's 512 to 4096) to its uint64 table value, avoiding a conversion.
+// SegmentSectorSizes is the whitelist of crypt-segment sector sizes, mapping
+// each accepted value to the uint64 the device-mapper table carries.
+//
+// It is a map rather than a range check FOR that mapping. The header field is
+// an int and the table field is a uint64, and looking the value up is what
+// relates the two without a conversion: `uint64(segment.SectorSize)` is how a
+// declared -1 became 18446744073709551615, and there is no conversion left to
+// get wrong or to suppress.
+//
+// The four values are measured against cryptsetup 2.7.0: --sector-size accepts
+// 512, 1024, 2048 and 4096, refuses 256 and 8192, and each accepted value was
+// read back out of the header it wrote. ValidateFormatOptions imposes a
+// narrower 512-or-4096 on this package's own WRITER, which is a choice about
+// what we emit; imposing it on the READ path would refuse two containers
+// cryptsetup can create.
 var SegmentSectorSizes = map[int]uint64{
 	512:  512,
 	1024: 1024,
@@ -29,7 +54,13 @@ var SegmentSectorSizes = map[int]uint64{
 	4096: 4096,
 }
 
-// CryptSegmentParams is the validated crypt-segment geometry a dm-crypt table is built from, filled only by CryptTableParams.
+// CryptSegmentParams is the crypt-segment geometry a dm-crypt table is built
+// from, in the types the table wants.
+//
+// Its fields are filled by CryptTableParams and by nothing else, and
+// unlockLoadTable takes one of these instead of a *Segment. That is what makes
+// the values validated by construction: there is no route from a header field
+// to the ioctl that does not pass through the validator.
 type CryptSegmentParams struct {
 	Encryption string
 	IVTweak    uint64
@@ -86,7 +117,21 @@ func validateSegment(id string, segment *Segment) error {
 	return err
 }
 
-// CryptTableParams validates a crypt segment for activation and returns its table parameters, refusing a segment that starts before the keyslots area ends.
+// CryptTableParams validates a crypt segment of metadata for ACTIVATION and
+// returns the parameters the device-mapper table is built from.
+//
+// It is the only way those three values are obtained. Unlock calls it for the
+// segment it selected, and the header read applies the same checks to every
+// segment through validateSegment, so a value that reaches the ioctl has been
+// through here whether the caller remembered or not.
+//
+// On top of what the read path checks, it refuses a segment that starts before
+// the end of the keyslots area. A plaintext mapping over the header
+// copies or the keyslots would hand them to whatever is written to the volume:
+// the first filesystem write destroys every keyslot. cryptsetup reads such a
+// header only as a DETACHED one, at offset 0, whose data lives on another
+// device; this package maps the data on the device that carries the header, so
+// it has no detached form to offer and refuses that too.
 func CryptTableParams(metadata *Metadata, id string, segment *Segment) (CryptSegmentParams, error) {
 	geometry, err := configGeometry(metadata.Config)
 	if err != nil {

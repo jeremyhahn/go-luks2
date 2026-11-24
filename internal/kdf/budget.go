@@ -14,7 +14,10 @@ const (
 	minPRFOutputLen  = 20
 )
 
-// Work counts key-derivation cost in PBKDF2 PRF blocks and Argon2 KiB-passes; diagnostic, not precise.
+// Work counts the key-derivation cost a scan would spend, in units cheap
+// enough to add and compare without overflow risk: PBKDF2 PRF blocks and
+// Argon2 KiB-passes (memory KiB times time cost). It is diagnostic, not a
+// precise cost model.
 type Work struct {
 	PBKDF2Blocks    uint64
 	Argon2KiBPasses uint64
@@ -59,7 +62,12 @@ var ceilingWork = Work{
 	Argon2KiBPasses: uint64(MaxArgon2Time) * uint64(MaxArgon2Memory),
 }
 
-// OperationBudget is the most derivation work one operation may spend scanning up to maxKeyslots keyslots.
+// OperationBudget is the most key-derivation work one operation may spend
+// scanning a header of up to maxKeyslots keyslots: twice the ceiling cost of
+// every keyslot having both a keyslot derivation and a digest derivation at
+// the ceiling. maxKeyslots is a parameter, not LUKS2MaxKeyslots imported
+// directly, because this package sits below internal/header in the import
+// DAG and may not import it.
 func OperationBudget(maxKeyslots int) Work {
 	if maxKeyslots < 0 {
 		maxKeyslots = 0
@@ -71,7 +79,11 @@ func OperationBudget(maxKeyslots int) Work {
 	}
 }
 
-// DerivationWork estimates the cost of deriving outLen bytes under p; a malformed p contributes zero.
+// DerivationWork estimates the key-derivation cost of deriving outLen bytes
+// under p. It is defensive rather than erroring on a malformed or
+// placeholder p: a p that fails to carry usable cost fields contributes zero
+// work rather than failing a scan that has already screened the header
+// elsewhere.
 func DerivationWork(p Params, outLen int) Work {
 	if outLen <= 0 {
 		return Work{}

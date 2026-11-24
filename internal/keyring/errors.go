@@ -11,7 +11,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Failure classifies a keyring syscall errno and attaches the remedy for that cause.
+// Failure classifies an errno from a keyring syscall and attaches the remedy
+// for that specific cause.
+//
+// The classification is not cosmetic. A blocked syscall, a kernel without key
+// support, an exhausted quota and a genuine kernel refusal are four different
+// problems with four different fixes, and a single "keyring unavailable"
+// would be technically true and operationally useless.
 func Failure(op string, err error) error {
 	return &UnavailableError{Op: op, Kind: Classify(err), Err: err}
 }
@@ -49,7 +55,14 @@ func Remedy(kind error) string {
 	}
 }
 
-// Sentinel is the type of every keyring sentinel: each reports as ErrKeyring while staying distinct.
+// Sentinel is the type every keyring sentinel below has, so that all of them
+// report themselves as ErrKeyring while remaining distinct from each other.
+//
+// A plain errors.New value cannot do that -- errors.Is compares those by
+// identity and there is nowhere to hang a second relationship -- and wrapping
+// each sentinel in an ErrKeyring at every construction site would prefix
+// every message with the root's text. The type is a string so two sentinels
+// are distinct exactly when their messages differ.
 type Sentinel string
 
 func (e Sentinel) Error() string { return string(e) }
@@ -65,7 +78,11 @@ var (
 	// sentinel below matches it too.
 	ErrKeyring error = Sentinel("dmcrypt: a kernel keyring operation failed")
 
-	// ErrUnavailable indicates the volume key could not be placed in the kernel keyring and the operation was refused.
+	// ErrUnavailable indicates that the volume key could not be placed in the
+	// kernel keyring, and that the operation was therefore REFUSED. It is the
+	// umbrella for UNAVAILABILITY specifically; it is NOT the catch-all for
+	// everything keyring-shaped (ErrEntryExists and ErrKeyNotReleased do not
+	// match it -- use ErrKeyring for that).
 	ErrUnavailable error = Sentinel("dmcrypt: the volume key could not be placed in the kernel keyring")
 
 	// ErrBlocked indicates the kernel keyring syscalls are refused by policy
@@ -84,14 +101,24 @@ var (
 	// describe.
 	ErrFailed error = Sentinel("dmcrypt: the kernel keyring refused the operation")
 
-	// ErrEntryExists indicates a key already existed under this unlock's description; refused.
+	// ErrEntryExists indicates a key was ALREADY present under the
+	// description this unlock was about to use -- an anomaly, refused rather
+	// than resolved (see AddVolumeKey).
 	ErrEntryExists error = Sentinel("dmcrypt: a kernel keyring entry already exists for this volume")
 
-	// ErrKeyNotReleased indicates a volume-key entry could not be revoked and unlinked and may still be present.
+	// ErrKeyNotReleased indicates that a keyring entry holding a volume key
+	// could not be revoked and unlinked after the activation that needed it,
+	// and that the key MAY STILL BE PRESENT in the kernel keyring.
 	ErrKeyNotReleased error = Sentinel("dmcrypt: a kernel keyring entry holding the volume key could not be released")
 )
 
-// UnavailableError reports that the kernel keyring could not hold the volume key, the failed step and its remedy; always fatal.
+// UnavailableError reports that the kernel keyring could not hold the volume
+// key, names the step that failed, and carries the REMEDY for the specific
+// cause.
+//
+// It is fatal and never a degradation: the alternative is the volume master
+// key in memory this library cannot wipe, for an unbounded time, and a caller
+// that got a successful return would believe a guarantee that did not hold.
 type UnavailableError struct {
 	// Op names the keyring step that failed. It never carries key content.
 	Op string
@@ -100,7 +127,8 @@ type UnavailableError struct {
 	// ErrQuotaExhausted or ErrFailed.
 	Kind error
 
-	// Err is the underlying errno, reachable through Unwrap.
+	// Err is the underlying errno, kept reachable through Unwrap so a caller
+	// can match unix.EPERM, unix.EDQUOT or unix.ENOSYS directly.
 	Err error
 }
 
@@ -120,7 +148,10 @@ func (e *UnavailableError) kind() error {
 
 func (e *UnavailableError) Unwrap() error { return e.Err }
 
-// Is matches the specific cause, ErrUnavailable and ErrKeyring.
+// Is reports every UnavailableError as its specific cause, as the
+// ErrUnavailable umbrella and as the ErrKeyring root, so a caller can branch
+// on the cause it can do something about and fall back to either umbrella for
+// the rest.
 func (e *UnavailableError) Is(target error) bool {
 	return target == ErrKeyring || target == ErrUnavailable || target == e.kind()
 }

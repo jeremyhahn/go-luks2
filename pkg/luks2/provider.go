@@ -25,7 +25,28 @@ type Enrollment struct {
 	Token   int
 }
 
-// Enroll adds a KeyProvider's credential under key and records its token; a failed token write rolls the keyslot back, and the provider runs before any lock.
+// Enroll adds a KeyProvider's credential to the volume under key -- the
+// caller's already-recovered volume key -- and records the provider's token
+// alongside the keyslot it went to.
+//
+// It is built on the internals AddRecoveryKey also uses:
+// addKeyslotWithMasterKey for the keyslot, which re-verifies key against the
+// header's digests under THIS call's own exclusive lock (the
+// header may have changed since Unlock), and importTokenLocked for the
+// token. key is only ever borrowed; a clone of its bytes is what
+// addKeyslotWithMasterKey consumes, so the caller's Key is unchanged and
+// still theirs to Destroy.
+//
+// If the token write fails, the keyslot is rolled back, as AddRecoveryKey
+// does: a keyslot nothing describes is a live credential indistinguishable from one still in
+// use.
+//
+// The provider runs BEFORE mu and the device lock, and so do AddKeyslot's creation checks on kp and on the credential: a provider
+// that blocks on a FIDO2 touch or a helper process must not hold off
+// cryptsetup's writers, and one that reads this Volume must not deadlock on
+// it. As for AddKeyslot, no exclusive open is taken: the exclusive flock
+// excludes other writers, and a volume that is mapped or mounted can still
+// be enrolled, as cryptsetup's own token import can.
 func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp KeyslotParams) (Enrollment, error) {
 	const op = "Volume.Enroll"
 	if err := v.checkOpenNow(op); err != nil {
@@ -144,7 +165,19 @@ func (v *Volume) Enroll(ctx context.Context, key *Key, p KeyProvider, kp Keyslot
 	return Enrollment{Keyslot: info, Token: tokenID}, nil
 }
 
-// UnlockWithProvider opens the volume trying only the keyslots p.Token().Keyslots names, by priority (prefer, normal, then ignore); the provider runs before any lock.
+// UnlockWithProvider opens the volume with a KeyProvider's credential, trying
+// only the keyslots p.Token().Keyslots names -- unlike
+// Unlock, which tries every keyslot bound to the data segment.
+//
+// They are tried by priority, as cryptsetup tries the keyslots of a token the
+// caller names (luks2_token.c, LUKS2_keyslot_open_by_token): every prefer
+// keyslot first, then every normal one, then every ignore one, each group in
+// the token's order. A named token makes its ignore keyslots eligible, last;
+// only cryptsetup's scan of every token skips them, and this library never
+// chooses a token for the caller.
+//
+// The provider runs BEFORE mu and the shared device lock, for the reasons
+// Enroll gives.
 func (v *Volume) UnlockWithProvider(ctx context.Context, p KeyProvider) (*Key, error) {
 	const op = "Volume.UnlockWithProvider"
 	if err := v.checkOpenNow(op); err != nil {

@@ -16,7 +16,11 @@ import (
 	"github.com/jeremyhahn/go-luks2/pkg/luks2"
 )
 
-// ReadHeader reads and validates the primary LUKS2 header from a device, returning the raw BinaryHeader and Metadata.
+// ReadHeader reads and validates the PRIMARY LUKS2 header from a device, the
+// way the pre-redesign library's own luks2.ReadHeader did before B.6 renamed
+// it away in favor of (*luks2.Volume).Header, which returns a read-only view
+// rather than the raw on-disk BinaryHeader and Metadata these integration
+// tests assert on directly.
 func ReadHeader(device string) (*header.BinaryHeader, *header.Metadata, error) {
 	f, err := os.Open(device) // #nosec G304 -- the test's own fixture path
 	if err != nil {
@@ -44,7 +48,8 @@ func ReadCurrentHeader(device string) (*header.BinaryHeader, *header.Metadata, e
 	return cur.Header, cur.Metadata, nil
 }
 
-// ReadSecondaryHeader reads and validates the second LUKS2 header copy (SKUL magic).
+// ReadSecondaryHeader reads and validates the SECOND LUKS2 header copy, the
+// one carrying the SKUL magic. See ReadHeader.
 func ReadSecondaryHeader(device string) (*header.BinaryHeader, *header.Metadata, error) {
 	f, err := os.Open(device) // #nosec G304 -- the test's own fixture path
 	if err != nil {
@@ -196,7 +201,13 @@ func GetVolumeInfo(device string) (*VolumeInfo, error) {
 	return info, nil
 }
 
-// SetupLoopDevice attaches a loop device for file, which must be below the run root BeginSuite recorded.
+// SetupLoopDevice creates a loop device for file, the way the pre-redesign
+// library's luks2.SetupLoopDevice did before B.6 renamed it away in favor of
+// pkg/loop.Attach, which returns a *loop.Device rather than a bare path.
+//
+// It refuses a file that is not below the run root BeginSuite recorded:
+// that record, made before any test runs, is what lets a later run's reaper
+// find and detach the device by its backing file if this run dies first.
 func SetupLoopDevice(file string) (string, error) {
 	if err := checkBackedUnderRunRoot(file); err != nil {
 		return "", err

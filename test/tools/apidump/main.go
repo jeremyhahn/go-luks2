@@ -2,7 +2,18 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Command apidump records and compares a Go package's exported API: dump, diff, check, honor and documented, against baseline/.
+// Command apidump records and compares the exported API of a Go package.
+//
+//	apidump dump <dir>                        print the exported API declared in dir
+//	apidump diff <baseline> <dir>             print what dir removed (-) and added (+) since baseline
+//	apidump check <baseline> <dispositions>   fail unless every baseline identifier has exactly one disposition
+//	apidump honor <baseline> <dispositions> <dir>        fail unless dir's API honors every disposition
+//	apidump documented <exceptions> <docs> <pkg-root>    fail unless every export under pkg-root is named in a feature doc
+//
+// baseline/ holds the API as released in 0.5.0-alpha (luks2.tsv,
+// cmd-luks2.tsv) and the redesign's disposition of every pkg/luks2 identifier
+// (disposition-luks2.tsv). The check runs as a unit test of
+// this package, so a disposition file that drifts from its baseline fails CI.
 package main
 
 import (

@@ -35,7 +35,17 @@ func canonicalTokenID(key string) (int, bool) {
 // keys: systemd-cryptenroll's "systemd-recovery".
 const TokenTypeRecovery = header.TokenTypeSystemdRecovery
 
-// Token is a LUKS2 token: Keyslots (never nil on the wire) and Members, every field not modeled, kept untouched; a zero Token writes nothing.
+// Token is a LUKS2 token: a named external-credential binding recorded in the
+// header. Keyslots is the set of keyslot ids the token
+// identifies -- empty for a token that names none, never nil on the wire,
+// since LUKS2 requires the member to be an array. Members carries every field
+// this package does not model as a typed one itself -- a systemd-fido2
+// token's fido2-credential/fido2-salt/fido2-rp and requirement flags, a
+// systemd-tpm2 token's fields, or any other token type's -- untouched, so
+// writing a token back never drops what wrote it.
+//
+// A zero Token (empty Type) is the KeyProvider.Token anonymous case: no token
+// should be written for it.
 type Token struct {
 	Type     string
 	Keyslots []int

@@ -4,7 +4,51 @@
 
 //go:build linux
 
-// Command docker-run runs the integration container with its measured privilege set (docs/volumes/engineering.md): build/docker-run [docker flags ...] -- [command ...], with TEST_STATE_DIR and IMAGE from the environment.
+// Command docker-run is the one place the integration container's privilege set
+// is written down. It replaces test/integration/docker-run.sh, because the
+// public release ships no shell scripts; the privilege
+// set is the script's, flag for flag, and TestPrivileges_IsExactlyTheMeasuredSet
+// pins it.
+//
+// One place, so a security-critical invocation cannot drift. --privileged is
+// not used because it is not a privilege: it is the absence of every
+// restriction Docker has. All capabilities, seccomp off, AppArmor off, and the
+// whole host /dev bind-mounted in, which on the machine this was measured on
+// meant the container could open the root NVMe, an unrelated RAID array and
+// every dm mapping on the box. This library holds volume keys for a trusted
+// computing platform, and a test rig is not where
+// that gets handed away for convenience.
+//
+// Every flag was measured, not assumed. docs/volumes/engineering.md carries the table of
+// what fails when each one is removed; the reasons are repeated at each flag in
+// privileges because that is where someone deletes one.
+//
+// Usage, from the repository root (the binary itself finds the seccomp profile
+// from anywhere inside the checkout, but these paths are root-relative):
+// Run the BUILT binary, never `go run`: `go run` is a parent process that
+// reports any non-zero child exit as 1, so docker's own 125, 126 and 127 would
+// not reach the caller.
+//
+//	make docker-run-bin
+//	build/docker-run [docker flags ...] -- [command ...]
+//
+// Flags before `--` go to `docker run`; everything after it is the command for
+// the container, and an empty command runs the image's default (the whole suite
+// with coverage). The `--` is mandatory so neither list can swallow the other.
+//
+//	build/docker-run --rm -- go test -tags=integration ./...
+//	build/docker-run --name go-luks2-test-runner --
+//
+// Environment:
+//
+//	TEST_STATE_DIR  host directory holding the run ledgers, bind-mounted in.
+//	                Read test/internal/harness before changing it: it is part of the
+//	                trust boundary, not a cache.
+//	IMAGE           image to run.
+//
+// The process REPLACES itself with docker (execve), as the script's `exec` did:
+// docker's exit status, its signal handling and an interactive -it terminal are
+// then docker's own, with nothing in between to lose them.
 package main
 
 import (

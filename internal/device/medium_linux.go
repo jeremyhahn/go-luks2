@@ -20,7 +20,12 @@ import (
 // use: the largest logical block size a device this library opens presents.
 const directIOAlign = 4096
 
-// ReadPastCache reads up to n bytes of path at off with O_DIRECT; without O_DIRECT it falls back only on memory filesystems, else ErrUnsupported.
+// ReadPastCache reads up to n bytes of path from offset off past the page
+// cache: an O_DIRECT read. Where O_DIRECT is refused, it falls back to an
+// ordinary read only if the page cache IS the storage (CacheIsTheStorage) --
+// there is no other medium to disagree with -- and otherwise fails with
+// ErrUnsupported: a read that cannot be confirmed is not reported as
+// confirmed.
 func ReadPastCache(ctx context.Context, op, path string, off int64, n int, openFile OpenFunc) ([]byte, error) {
 	f, err := Open(ctx, op, path, os.O_RDONLY|unix.O_DIRECT, openFile)
 	if err != nil {
@@ -80,7 +85,10 @@ func readBufferedAt(ctx context.Context, path string, off int64, n int, openFile
 	return buf[:read], nil
 }
 
-// CacheIsTheStorage reports whether path lives on tmpfs or ramfs; a block device never does.
+// CacheIsTheStorage reports whether path lives on a memory filesystem
+// (tmpfs, ramfs), where the page cache is the only copy there is. A block
+// device never does, whatever filesystem its node sits on (devtmpfs is
+// tmpfs).
 func CacheIsTheStorage(path string) (bool, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {

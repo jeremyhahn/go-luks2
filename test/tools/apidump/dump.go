@@ -15,7 +15,16 @@ import (
 	"strings"
 )
 
-// Entry is one API-dump line: kind (func, method, type, iface, var, const, fields, ifacemethods, alias), exported name and declaring file.
+// Entry is one line of an API dump: what kind of declaration it is, its
+// exported name, and the file that declares it.
+//
+// Kind is one of func, method, type, iface, var, const, fields (the exported
+// fields of a struct type, as Name{A,B}), ifacemethods (the methods of an
+// interface type, as Name{A,B}) and alias (a type declared with `type X =
+// Y`, alongside its own "type" entry). Fields, interface methods and the
+// alias marker are recorded so a dump shows a struct gaining or losing a
+// field or a type becoming an alias, but they are not identifiers of their
+// own: a disposition covers them through their type.
 type Entry struct {
 	Kind string
 	Name string

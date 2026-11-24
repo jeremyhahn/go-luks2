@@ -57,7 +57,20 @@ func exportIgnored(root string, attributes map[string][]byte, paths []string) (m
 	return parseExportIgnored(root, out, len(paths))
 }
 
-// ArchiveHEAD returns `git archive --format=tar` of HEAD at root, built in a hermeticRepo so only the commit's own GitAttributes decide what is exported.
+// ArchiveHEAD returns `git archive --format=tar` of the commit HEAD names in
+// the repository at root, as a clean publishing checkout of that commit
+// produces it. Only the commit's own GitAttributes files decide what is
+// export-ignored or converted.
+//
+// Running `git archive` in root would also honor its .git/info/attributes, its
+// configuration (a core.attributesFile, tar.umask, tar.<format>.command,
+// core.autocrlf, a filter driver) and the caller's system, global and XDG
+// configuration and GIT_ variables, none of which travel with the commit: an
+// export-ignore rule in any of them would hide a published file from a check
+// of the archive. So root is asked only for the commit and its object store,
+// and the archive is written in a hermeticRepo that borrows those objects as an
+// alternate. It has no work tree content and no index, and `git archive` reads
+// attributes from the archived tree, not from either.
 func ArchiveHEAD(root string) ([]byte, error) {
 	fail := func(stderr string, err error) error { return &ArchiveError{Root: root, Stderr: stderr, Err: err} }
 	repo, env, cleanup, err := hermeticRepo(fail)
@@ -114,7 +127,12 @@ func hermeticRepo(fail func(stderr string, err error) error) (repo string, env [
 	return repo, env, cleanup, nil
 }
 
-// HermeticGitEnv is the caller's environment minus every GIT_ variable, with HOME and XDG_CONFIG_HOME pointed at home and system and global configuration off.
+// HermeticGitEnv is the caller's environment without anything that points git
+// at configuration or attributes outside the repository it runs in: every GIT_
+// variable (GIT_DIR, GIT_CONFIG_PARAMETERS, GIT_ATTR_SOURCE, ...), HOME and
+// XDG_CONFIG_HOME, with the latter two pointed at home, which should be an
+// empty directory. The system configuration and attributes file are off, and
+// the global configuration is empty.
 func HermeticGitEnv(home string) []string {
 	var env []string
 	for _, kv := range os.Environ() {

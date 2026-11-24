@@ -2,7 +2,17 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package kdf derives keys from passphrases, bounds and calibrates their cost, and converts PBKDF2-SHA1 costs to SHA-256; Params keeps the salt base64.
+// Package kdf derives keys from passphrases, calibrates and bounds the cost
+// of doing so, and converts a legacy PBKDF2-SHA1 cost into its SHA-256
+// equivalent for a rewrite.
+//
+// # Params and the single conversion
+//
+// Params is the on-disk KDF object with its hash algorithm and cost fields
+// carried as given. Salt stays the base64 string LUKS2 stores it as: only the
+// derive path ever needs the decoded bytes, and decoding it there -- rather
+// than in whatever builds a Params -- means a cost-only caller (ValidateCost,
+// DerivationWork) can never fail on a salt it never reads.
 package kdf
 
 import (
@@ -52,7 +62,10 @@ type Deriver struct {
 	FIPS    fips.Mode
 }
 
-// Derive runs the KDF named by p against passphrase and adopts the result into an enclave.
+// Derive runs the KDF named by p against passphrase and adopts the result
+// into an enclave. custody.Adopt wipes the intermediate key on every path, so
+// there is no window in which the derived key outlives this call in the
+// clear.
 func (d Deriver) Derive(ctx context.Context, passphrase []byte, p Params, keySize int) (enclave.ByteAccess, error) {
 	key, err := d.DerivePlain(ctx, passphrase, p, keySize)
 	if err != nil {
@@ -145,7 +158,10 @@ func derivePBKDF2(passphrase, salt []byte, p Params, keySize int, mode fips.Mode
 	return key, nil
 }
 
-// DeriveArgon2i and DeriveArgon2id run Argon2 against an already-decoded salt.
+// DeriveArgon2i and DeriveArgon2id run Argon2 directly against an
+// already-decoded salt, for a caller that wants to compare or probe bytes
+// without going through a stored, base64 KDF object (DerivePlain's dispatch
+// decodes p.Salt itself; these two do not read it at all).
 func DeriveArgon2i(passphrase, salt []byte, p Params, keySize int) ([]byte, error) {
 	return deriveArgon2(p, "argon2i", "Argon2i", argon2.Key, passphrase, salt, keySize)
 }
@@ -229,7 +245,14 @@ func PBKDF2Hash(hashAlgo string) (crypto.Hash, error) {
 	}
 }
 
-// PBKDF2HashFunc resolves a PBKDF2 hash name to its constructor, refusing one the FIPS policy in mode does not approve.
+// PBKDF2HashFunc resolves a PBKDF2 hash algorithm name to its constructor,
+// refusing one the FIPS policy in mode does not approve.
+//
+// PBKDF2-HMAC-SHA1 is needed to open LUKS headers written by cryptsetup
+// releases that defaulted to SHA-1, but the Go Cryptographic Module permits
+// PBKDF2 only with SHA-2/SHA-3 and panics on SHA-1 under GODEBUG=fips140=only.
+// Refuse it here so a FIPS build reports a typed error instead of crashing,
+// and so the call never reaches the module. See docs/fips/architecture.md.
 func PBKDF2HashFunc(mode fips.Mode, hashAlgo string) (func() hash.Hash, error) {
 	h, err := PBKDF2Hash(hashAlgo)
 	if err != nil {

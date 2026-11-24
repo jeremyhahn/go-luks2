@@ -34,7 +34,9 @@ type Disposition struct {
 	Target string
 }
 
-// ReadDispositions parses a disposition file of tab-separated name, action, target rows; only KEEP may omit the target.
+// ReadDispositions parses a disposition file: one tab-separated
+// name/action/target row per identifier. The target may be empty only for
+// KEEP.
 func ReadDispositions(path string) ([]Disposition, error) {
 	data, err := os.ReadFile(path) // #nosec G304 G703 -- a disposition file the operator names on the command line
 	if err != nil {
@@ -90,7 +92,13 @@ func CheckCoverage(base []Entry, dispositions []Disposition) error {
 	return nil
 }
 
-// CheckHonored reports an error unless every KEEP identifier remains and every other disposed identifier is gone; fields and methods ride with their type.
+// CheckHonored reports an error unless the current API matches every
+// disposition exactly: a KEEP identifier is still there under the same
+// kind and name, and every RENAME/MOVE/UNEXPORT/DELETE identifier is gone
+// from the current API under its old kind and name. Fields and interface
+// methods ride with their type (Entry.Identifier) and are not checked on
+// their own; a disposition naming something outside base is not this
+// check's job (CheckCoverage reports it).
 func CheckHonored(base, current []Entry, dispositions []Disposition) error {
 	byName := map[string]Action{}
 	targetByName := map[string]string{}
