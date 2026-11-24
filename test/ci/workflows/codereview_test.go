@@ -25,49 +25,68 @@ func codeReview(t *testing.T) string {
 	return cr
 }
 
-// noReviewPaths is the gate's NO_REVIEW_PATHS, compiled as the extended
-// regex `grep -E` reads it.
-func noReviewPaths(t *testing.T) *regexp.Regexp {
+// workflowEnv is a workflow-level env value of code-review.yml.
+func workflowEnv(t *testing.T, name string) string {
 	t.Helper()
-	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).
-		FindAllStringSubmatch(codeReview(t), -1)
+	m := regexp.MustCompile(`(?m)^  `+name+`: '([^']*)'$`).FindAllStringSubmatch(codeReview(t), -1)
 	if len(m) != 1 {
-		t.Fatalf("%s: want one NO_REVIEW_PATHS, found %d", codeReviewWorkflow, len(m))
+		t.Fatalf("%s: want one %s, found %d", codeReviewWorkflow, name, len(m))
 	}
-	re, err := regexp.CompilePOSIX(m[0][1])
+	return m[0][1]
+}
+
+// nonCodePaths is NON_CODE_PATHS, compiled as the extended regex `grep -E`
+// reads it.
+func nonCodePaths(t *testing.T) *regexp.Regexp {
+	t.Helper()
+	re, err := regexp.CompilePOSIX(workflowEnv(t, "NON_CODE_PATHS"))
 	if err != nil {
-		t.Fatalf("NO_REVIEW_PATHS %q: %v", m[0][1], err)
+		t.Fatalf("NON_CODE_PATHS: %v", err)
 	}
 	return re
 }
 
-// Codex P1: a workflow controls credentials and merge enforcement, so no
-// change under .github/workflows/ is ever review-exempt.
+// livePR is PR 1's live body into main of o/r: its author and head repository.
+func livePR(head, author, repo string) string {
+	return `{"base":{"ref":"main","repo":{"full_name":"o/r"}},"head":{"sha":"` + head + `","repo":{"full_name":"` + repo +
+		`"}},"user":{"login":"` + author + `"}}`
+}
+
+// Codex P1: a workflow controls credentials and merge enforcement. Workflows
+// are configuration (NON_CODE_PATHS), so only a trusted author's PR from this
+// repository skips the review; a workflow change by an untrusted author or
+// from a fork is never exempt.
 func TestNoReviewPathsNeverExemptAWorkflow(t *testing.T) {
-	re := noReviewPaths(t)
-	paths := []string{
-		".github/workflows/code-review.yml",
-		".github/workflows/release.yml",
-		".github/workflows/automerge.yml",
-		".github/workflows/ci.yml",
-		".github/workflows/signatures.yml",
-		".github/workflows/new.yaml",
-		".github/workflows/sub/dir.yml",
-		// Codex P1: the Signatures job's key registry (ci.yml) is trust.
-		".github/allowed_signers",
-	}
+	re := nonCodePaths(t)
+	nonCode := []string{"docs/a.md", "docs/x/y.txt", "README.md", ".github/actionlint.yaml", ".gitea/x.yml",
+		"changelog.d/1.md", ".github/workflows/ci.yml", ".github/dependabot.yml", "LICENSE", ".gitignore"}
 	for _, f := range workflowFiles(t) {
-		paths = append(paths, rel(t, f))
+		nonCode = append(nonCode, rel(t, f))
 	}
-	for _, p := range paths {
-		if re.MatchString(p) {
-			t.Errorf("NO_REVIEW_PATHS exempts the workflow %s from review", p)
+	for _, p := range nonCode {
+		if !re.MatchString(p) {
+			t.Errorf("NON_CODE_PATHS calls %s code", p)
 		}
 	}
-	// The rest of the template's list still stands.
-	for _, p := range []string{"docs/a.md", "docs/x/y.txt", "README.md", ".github/actionlint.yaml", ".gitea/x.yml", "changelog.d/1.md"} {
-		if !re.MatchString(p) {
-			t.Errorf("NO_REVIEW_PATHS no longer exempts %s", p)
+	for _, p := range []string{"main.go", "go.mod", "go.sum", "Makefile", "scripts/x.sh", ".github/allowed_signers", "x.md/y.go"} {
+		if re.MatchString(p) {
+			t.Errorf("NON_CODE_PATHS calls the code %s documentation or configuration", p)
+		}
+	}
+	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	for _, c := range []struct{ name, author, repo string }{
+		{"an outside author", "outsider", "o/r"},
+		{"a fork", "go-luks2-agent[bot]", "x/r"},
+		{"dependabot", "dependabot[bot]", "o/r"},
+	} {
+		fix := map[string]string{
+			"_compare_" + base + "..." + head: `{"files":[{"filename":".github/workflows/release.yml"}]}`,
+			"_pulls_1":                        livePR(head, c.author, c.repo),
+			"_pulls_1_reviews":                `[]`,
+		}
+		code, out := runGateWith(t, head, fix, "HEAD_REF=feature/x")
+		if code == 0 || !strings.Contains(out, "fork or an untrusted author") {
+			t.Errorf("%s: a workflow change with no review passes the gate: exit %d\n%s", c.name, code, out)
 		}
 	}
 }
@@ -122,31 +141,39 @@ func runScope(t *testing.T) string {
 	return string(m[1])
 }
 
-// TestScopeSkipNeverSuppressesAWorkflowReview: InfoSec's guard clears only a
-// change of workflow files (Y-2), and this repository's NO_REVIEW_PATHS keeps
-// .github/workflows/ under review, so the gate needs a Codex approval of such
-// a change. A scope skip there would suppress the review job the gate waits
-// for (Codex P1, #490): a workflow change never skips the review, and the
-// gate still asks for the approval the review gives.
+// TestScopeSkipNeverSuppressesAWorkflowReview: whatever the scope job wrote,
+// a workflow change by an untrusted author or from a fork still needs a Codex
+// approval, while a trusted author's workflow change from this repository
+// passes; a code change is reviewed only on a SPEC row PR, and on any other
+// PR the gate fails and says why (Codex P1, #490).
 func TestScopeSkipNeverSuppressesAWorkflowReview(t *testing.T) {
 	if _, err := exec.LookPath("timeout"); err != nil {
 		t.Skip("timeout not installed")
 	}
 	skip := runScope(t)
-	if skip == "true" {
-		t.Errorf("the scope job skips the review of a workflow change the guard cleared; the gate still needs a Codex approval of it")
-	}
 	head, base := strings.Repeat("a", 40), strings.Repeat("b", 40)
 	fix := map[string]string{
-		"_compare_" + base + "..." + head: `{"files":[{"filename":".github/workflows/ci.yml"}]}`,
+		"_compare_" + base + "..." + head: `{"files":[{"filename":".github/workflows/ci.yml"},{"filename":"docs/a.md"}]}`,
 		"_pulls_1_reviews":                `[]`,
 	}
-	code, out := runGateWith(t, head, fix, "SCOPE_SKIP="+skip)
-	if code == 0 {
-		t.Errorf("the gate passes a workflow change with no review (scope skip=%s):\n%s", skip, out)
+	code, out := runGateWith(t, head, fix, "HEAD_REF=feature/x")
+	if code != 0 || !strings.Contains(out, "no code changed") {
+		t.Errorf("the gate fails a trusted change with no code (scope skip=%s): exit %d\n%s", skip, code, out)
 	}
-	if !strings.Contains(out, "at least one is code") && !strings.Contains(out, "needs a Codex approval") {
-		t.Errorf("the gate does not ask for a Codex approval of a workflow change:\n%s", out)
+	fix["_pulls_1"] = livePR(head, "outsider", "o/r")
+	code, out = runGateWith(t, head, fix, "HEAD_REF=feature/x", "SCOPE_SKIP="+skip)
+	if code == 0 || !strings.Contains(out, "must approve") {
+		t.Errorf("the gate passes an outside author's workflow change with no review (scope skip=%s): exit %d\n%s", skip, code, out)
+	}
+	delete(fix, "_pulls_1")
+	fix["_compare_"+base+"..."+head] = `{"files":[{"filename":"main.go"}]}`
+	code, out = runGateWith(t, head, fix, "HEAD_REF=feature/x")
+	if code == 0 || !strings.Contains(out, "not a SPEC row PR") {
+		t.Errorf("the gate does not refuse a code change off a row PR: exit %d\n%s", code, out)
+	}
+	code, out = runGateWith(t, head, fix)
+	if code == 0 || !strings.Contains(out, "at least one is code") {
+		t.Errorf("the gate does not ask for a Codex approval of a code change on a row PR: exit %d\n%s", code, out)
 	}
 }
 
@@ -350,7 +377,7 @@ if [ -f "$f" ]; then cp "$f" "$out"; printf 200; else echo '{}' > "$out"; printf
 `
 
 // runGate runs the gate step's script against fixtures (API path, with /
-// made _, to body) for a code change on PR 1 at head into main.
+// made _, to body) for a code change on PR 1, a row PR, at head into main.
 func runGate(t *testing.T, head string, fix map[string]string) (int, string) {
 	t.Helper()
 	return runGateWith(t, head, fix)
@@ -372,14 +399,8 @@ func runGateWith(t *testing.T, head string, fix map[string]string, extra ...stri
 	for _, l := range strings.Split(g[i+len("run: |\n"):], "\n") {
 		script.WriteString(strings.TrimPrefix(l, "          ") + "\n")
 	}
-	m := regexp.MustCompile(`(?m)^\s+NO_REVIEW_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
-	docs := regexp.MustCompile(`(?m)^\s+DOCS_PATHS: '([^']*)'\s*$`).FindStringSubmatch(codeReview(t))
-	if docs == nil {
-		t.Fatal("gate: no DOCS_PATHS")
-	}
-	if m == nil {
-		t.Fatalf("gate: no NO_REVIEW_PATHS")
-	}
+	nonCode, row := workflowEnv(t, "NON_CODE_PATHS"), workflowEnv(t, "ROW_BRANCH")
+	authors, trusted := workflowEnv(t, "TRUSTED_AUTHORS"), workflowEnv(t, "TRUSTED_PR")
 	dir := t.TempDir()
 	bin, fixDir, work := filepath.Join(dir, "bin"), filepath.Join(dir, "fix"), filepath.Join(dir, "work")
 	for _, d := range []string{bin, fixDir, work} {
@@ -398,7 +419,7 @@ func runGateWith(t *testing.T, head string, fix map[string]string, extra ...stri
 	all := map[string]string{
 		"_actions_runs_42":                `{"workflow_id":7}`,
 		"_compare_" + base + "..." + head: `{"files":[{"filename":"main.go"}]}`,
-		"_pulls_1":                        `{"base":{"ref":"main"},"head":{"sha":"` + head + `"}}`,
+		"_pulls_1":                        livePR(head, "go-luks2-agent[bot]", "o/r"),
 	}
 	for k, v := range fix {
 		all[k] = v
@@ -418,9 +439,9 @@ func runGateWith(t *testing.T, head string, fix map[string]string, extra ...stri
 		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FIX="+fixDir, "GITHUB_RUN_ID=42", "GH_API_TOKEN=x", "FORGE=github", "REVIEWER=codex",
 		"REPO_API=https://api.example/repos/o/r", "PR_NUM=1", "EVENT_SHA="+head,
-		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "NO_REVIEW_PATHS="+m[1],
-		// v5.12.1/v5.12.2: the gate also reads the docs list and the scope job.
-		"DOCS_PATHS="+docs[1], "SCOPE_SKIP=", "SCOPE_RESULT=success")
+		"BASE_SHA="+base, "BASE_REF=main", "REVIEW_RESULT=skipped", "SCOPE_RESULT=success",
+		"NON_CODE_PATHS="+nonCode, "ROW_BRANCH="+row, "HEAD_REF=row/1-gate",
+		"TRUSTED_AUTHORS="+authors, "TRUSTED_PR="+trusted)
 	cmd.Env = append(cmd.Env, extra...)
 	out, _ := cmd.CombinedOutput()
 	return cmd.ProcessState.ExitCode(), string(out)
