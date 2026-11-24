@@ -1170,6 +1170,9 @@ jobs:
           rm -rf "$t"
           [ "$rc" -eq 0 ] || { echo "::error::runner-select-tests.py exited $rc"; exit 1; }
           grep -q 'ALL PASS' <<<"$out" || { echo "::error::runner-select-tests.py printed no ALL PASS"; exit 1; }
+      # Drafts are not reviewed, by job condition and by the live PR (code-review v5.12.13).
+      - name: Code review draft tests
+        run: python3 -I test/ci/workflows/testdata/code-review-v51213-tests.py .github/workflows/code-review.yml
 
       - name: Is every changed file docs or markdown?
         id: diff
