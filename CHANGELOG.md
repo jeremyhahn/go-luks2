@@ -7,14 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- **Go toolchain 1.27.4 for GO-2026-6859, net/http (#441).** govulncheck
-  reports GO-2026-6859 in the go1.27.3 standard library, fixed in go1.27.4
-  (2026-11-02). Every Go version pin moves to 1.27.4: the `go` directive in
-  `go.mod`, `GO_VERSION` in the release workflow, the CLI image `golang:` tag,
-  the devcontainer `golang:` image tag and digest, and the README build
-  requirement.
+## [1.0.3-rc.1] - 2026-11-25
 
 ### Changed
 
@@ -64,6 +57,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KDF's structure is now screened before the FIPS policy judges it, and unlock
   fails with `ErrInvalidHeader` in FIPS mode as outside it.
 
+
+- **golang.org/x/sys is v0.50.0, so every direct dependency is at its latest
+  release again.** `make deps-check` reported v0.49.0 as behind the latest
+  release. golang.org/x/crypto and golang.org/x/term still require v0.49.0;
+  the module now selects v0.50.0 for all three.
+- **golang.org/x/term is v0.48.0, so every direct dependency is at its latest
+  release again.** The release only raises its golang.org/x/sys requirement
+  to v0.50.0, which this module already selects; `term.ReadPassword` and
+  `term.IsTerminal`, the calls the CLI prompt uses, are unchanged. `go.sum`
+  drops checksums no module in the graph needs any more.
+
+
+- **go-luks2 requires go-enclave v0.12.0-alpha (#503).** It is go-enclave's
+  first public release: its root module now depends only on `golang.org/x/sys`
+  (v0.50.0, the version go-luks2 already requires) and needs Go 1.27.4, the
+  minimum go-luks2 already sets. The residue sweep behind its conformance
+  checks skips a thread-stack guard page on kernels that report one instead of
+  failing. Its one breaking change removes the `backends/imxele` module, which
+  go-luks2 never used, and it changes no API go-luks2 calls. Nothing changes
+  for go-luks2 callers.
+
 ### Fixed
 
 - **The `pkg/luks2` race run stays well inside its memory bound.** The
@@ -101,17 +115,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docker-build-integration` accepted any failed build whose tag resolved
   afterwards; it now needs the refusal too.
 
-### Changed
+### Security
 
-- **golang.org/x/sys is v0.50.0, so every direct dependency is at its latest
-  release again.** `make deps-check` reported v0.49.0 as behind the latest
-  release. golang.org/x/crypto and golang.org/x/term still require v0.49.0;
-  the module now selects v0.50.0 for all three.
-- **golang.org/x/term is v0.48.0, so every direct dependency is at its latest
-  release again.** The release only raises its golang.org/x/sys requirement
-  to v0.50.0, which this module already selects; `term.ReadPassword` and
-  `term.IsTerminal`, the calls the CLI prompt uses, are unchanged. `go.sum`
-  drops checksums no module in the graph needs any more.
+- **Go toolchain 1.27.4 for GO-2026-6859, net/http (#441).** govulncheck
+  reports GO-2026-6859 in the go1.27.3 standard library, fixed in go1.27.4
+  (2026-11-02). Every Go version pin moves to 1.27.4: the `go` directive in
+  `go.mod`, `GO_VERSION` in the release workflow, the CLI image `golang:` tag,
+  the devcontainer `golang:` image tag and digest, and the README build
+  requirement.
+
+
+- **The integration image tracks the Debian package index.** `make -s
+  apt-index-sum` hashes the base image's live Debian index; CI puts it in
+  APT_INDEX_SUM, which the integration image's content tag hashes and whose
+  build argument the integration stage declares before its own `apt-get
+  upgrade`. A Debian security fix now renames the image and re-runs that
+  upgrade, where before a cached base upgrade layer kept the old packages: main
+  9ab065b04 still shipped linux-libc-dev 6.12.116-1 under a new base digest.
+
+
+- **The devcontainer and integration images take Debian's linux-libc-dev
+  6.12.117-1.** The base digest moves to the 2026-11-10 golang:1.27.4 rebuild,
+  so the base stage's apt-get upgrade runs again instead of reusing a cached
+  layer that held linux-libc-dev 6.12.116-1, whose six HIGH CVEs (among them
+  CVE-2026-98466) failed trivy image on main c9f8f3be9.
 
 ## [1.0.3-alpha] - 2026-11-10
 
