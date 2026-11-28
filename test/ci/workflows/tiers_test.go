@@ -101,17 +101,17 @@ func TestOnlyNightlyIsScheduled(t *testing.T) {
 	}
 }
 
-// TestMainRunsCancelPerEvent: on main one concurrency group per event, elsewhere one per ref; cancel-in-progress is literal true.
+// TestMainRunsCancelPerEvent: a push to main is grouped by its sha (never cancelled), other main runs one group per event, elsewhere one per ref; cancel-in-progress is literal true.
 func TestMainRunsCancelPerEvent(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
 	if m == nil {
 		t.Fatal("ci.yml has no workflow-level concurrency block")
 	}
-	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
+	want := "  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && github.event_name == 'push' && format('main-push-{0}', github.sha) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}\n" +
 		"  cancel-in-progress: true\n"
 	if m[1] != want {
-		t.Errorf("ci.yml's concurrency block is\n%s\nwant one main group per event\n%s", m[1], want)
+		t.Errorf("ci.yml's concurrency block is\n%s\nwant a sha group per main push and one main group per other event\n%s", m[1], want)
 	}
 }
 

@@ -1,5 +1,5 @@
-# ci-template: v1.54 (customized)
-# go-luks2 keeps these deviations from v1.54, each marked
+# ci-template: v1.61 (customized)
+# go-luks2 keeps these deviations from v1.61, each marked
 # `# CUSTOMIZE (go-luks2):` where it lives: the merge-check, test-race and
 # fips jobs and their CI Gate lines; no schedule trigger (#341,
 # TestNoScheduleTrigger); no shell scripts (#211), so each template script is
@@ -640,6 +640,12 @@ on:
   # TestNoScheduleTrigger); main's full tier runs after every merge and on
   # workflow_dispatch, never on a cron.
 
+# v1.61: a push to main is grouped by its sha, `main-push-{sha}`, and is
+# never cancelled, so every main commit gets its own verdict; a
+# workflow_dispatch run on main keeps `main-workflow_dispatch`, a schedule
+# run keeps `schedule-{repository}`, and a pull request keeps its ref group,
+# so a newer head still cancels the older run. cancel-in-progress stays a
+# literal true. Before v1.61:
 # v1.53 (ruling 1087): on main the group is the workflow and the event,
 # `main-{event}`, so a newer main run cancels the older one. Before v1.53:
 # v1.26.2: on main the group is the workflow, the event and the commit sha,
@@ -652,7 +658,7 @@ on:
 # v1.29.3: a schedule run's group is `schedule-{repository}`, with no sha, so a
 # repository has one schedule run at a time (none is scheduled here).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && format('schedule-{0}', github.repository) || github.ref == 'refs/heads/main' && github.event_name == 'push' && format('main-push-{0}', github.sha) || github.ref == 'refs/heads/main' && format('main-{0}', github.event_name) || github.ref }}
   cancel-in-progress: true
 
 permissions:
