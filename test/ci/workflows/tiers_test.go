@@ -101,7 +101,7 @@ func TestOnlyNightlyIsScheduled(t *testing.T) {
 	}
 }
 
-// TestMainRunsCancelPerEvent: a push to main is grouped by its sha (never cancelled), other main runs one group per event, elsewhere one per ref; cancel-in-progress is literal true.
+// TestMainRunsCancelPerEvent: a push to main is grouped by its own sha, other main runs one group per event, elsewhere one per ref; cancel-in-progress is literal true.
 func TestMainRunsCancelPerEvent(t *testing.T) {
 	ci := readFile(t, ".github/workflows/ci.yml")
 	m := regexp.MustCompile(`(?m)^concurrency:\n((?:  .*\n)+)`).FindStringSubmatch(ci)
